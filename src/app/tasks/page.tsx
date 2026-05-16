@@ -2,7 +2,9 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TaskCard, type TaskCardData } from "@/components/task-card";
+import { Card, CardContent } from "@/components/ui/card";
 import { redirect } from "next/navigation";
+import { formatPoints } from "@/lib/utils";
 
 const CATEGORIES = ["ALL", "SOCIAL", "CONTENT", "REFERRAL", "DAILY"] as const;
 
@@ -25,6 +27,7 @@ export default async function TasksPage() {
         taskId: true,
         status: true,
         createdAt: true,
+        pointsAwarded: true,
       },
     }),
   ]);
@@ -50,9 +53,7 @@ export default async function TasksPage() {
         .filter((s) => s.status === "APPROVED" || s.status === "AUTO_APPROVED")
         .sort((a, b) => +b.createdAt - +a.createdAt)[0];
       if (last) {
-        cooldownUntil = new Date(
-          +last.createdAt + t.cooldownHrs * 3600 * 1000,
-        ).toISOString();
+        cooldownUntil = new Date(+last.createdAt + t.cooldownHrs * 3600 * 1000).toISOString();
       }
     }
     return {
@@ -72,6 +73,15 @@ export default async function TasksPage() {
     };
   });
 
+  // Aggregate stats for the header banner
+  const totalTasks = items.length;
+  const doneTasks = items.filter(
+    (i) => i.maxPerUser != null && i.completedCount >= i.maxPerUser,
+  ).length;
+  const completionCount = items.reduce((acc, i) => acc + i.completedCount, 0);
+  const pendingTotal = items.reduce((acc, i) => acc + i.pendingCount, 0);
+  const earnedThisPeriod = submissions.reduce((acc, s) => acc + s.pointsAwarded, 0);
+
   return (
     <div className="container py-10 space-y-8">
       <div>
@@ -80,6 +90,15 @@ export default async function TasksPage() {
           Pick a quest, submit proof, earn $MCM points.
         </p>
       </div>
+
+      <Card>
+        <CardContent className="pt-6 grid grid-cols-2 md:grid-cols-4 gap-6">
+          <Stat label="Available tasks" value={`${totalTasks - doneTasks}/${totalTasks}`} />
+          <Stat label="Completions" value={formatPoints(completionCount)} />
+          <Stat label="Pending review" value={formatPoints(pendingTotal)} accent={pendingTotal > 0} />
+          <Stat label="Earned (lifetime sub.)" value={formatPoints(earnedThisPeriod)} accent />
+        </CardContent>
+      </Card>
 
       <Tabs defaultValue="ALL">
         <TabsList>
@@ -107,6 +126,25 @@ export default async function TasksPage() {
           );
         })}
       </Tabs>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-xs text-muted-foreground uppercase tracking-wider">{label}</div>
+      <div className={`mt-1 text-2xl font-bold ${accent ? "text-neon text-glow" : ""}`}>
+        {value}
+      </div>
     </div>
   );
 }

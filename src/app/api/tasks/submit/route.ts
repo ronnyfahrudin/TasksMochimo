@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { moderateContent } from "@/lib/ai-moderate";
 import { awardPoints } from "@/lib/points";
+import { canonicalTweetUrl, extractTweetId } from "@/lib/twitter";
 
 const BodySchema = z.object({
   taskId: z.string().min(1),
@@ -38,7 +39,11 @@ export async function POST(req: Request) {
     );
   }
   const { taskId } = parsed.data;
-  const proofUrl = parsed.data.proofUrl?.trim() || null;
+  // Normalize tweet URLs to canonical x.com/{user}/status/{id} so duplicates
+  // are detected across x.com/twitter.com/mobile and tracking params.
+  const rawProofUrl = parsed.data.proofUrl?.trim() || null;
+  const tweetCanonical = rawProofUrl ? canonicalTweetUrl(rawProofUrl) : null;
+  const proofUrl = tweetCanonical ?? rawProofUrl;
   const proofText = parsed.data.proofText?.trim() || null;
 
   const task = await prisma.task.findUnique({ where: { id: taskId } });
@@ -111,15 +116,31 @@ export async function POST(req: Request) {
     }
   }
 
-  // Block duplicate proof URLs system-wide
+  // Block duplicate proof URLs system-wide. For Twitter URLs, dedup by tweet
+  // ID (resistant to x.com↔twitter.com, tracking params, /photo paths). Other
+  // URL types fall back to exact-string compare. We include FLAGGED in the
+  // statuses so users can't recycle a previously-flagged tweet by editing
+  // the URL slightly.
   if (proofUrl) {
+    const tweetId = extractTweetId(proofUrl);
+    const dupeWhere = tweetId
+      ? { proofUrl: { contains: `/status/${tweetId}` } }
+      : { proofUrl };
     const dupe = await prisma.submission.findFirst({
-      where: { proofUrl, status: { in: ["APPROVED", "AUTO_APPROVED", "PENDING"] } },
-      select: { id: true, userId: true },
+      where: {
+        ...dupeWhere,
+        status: { in: ["APPROVED", "AUTO_APPROVED", "PENDING", "FLAGGED"] },
+      },
+      select: { id: true, userId: true, taskId: true },
     });
     if (dupe) {
+      const sameUser = dupe.userId === userId;
       return NextResponse.json(
-        { error: "This proof URL was already submitted." },
+        {
+          error: sameUser
+            ? "You already submitted this tweet."
+            : "This tweet was already claimed by another user.",
+        },
         { status: 409 },
       );
     }
