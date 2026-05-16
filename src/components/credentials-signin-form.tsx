@@ -42,7 +42,6 @@ export function CredentialsSignInForm() {
           autoComplete="username"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="ronnyfahrudin"
         />
       </div>
       <div className="space-y-1.5">
@@ -53,7 +52,6 @@ export function CredentialsSignInForm() {
           autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="••••••••"
         />
       </div>
       {err && <p className="text-xs text-red-400">{err}</p>}

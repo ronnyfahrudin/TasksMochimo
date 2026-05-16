@@ -43,6 +43,75 @@ const tasks = [
     autoApprove: false,
     meta: { hashtags: ["Mochimo", "MCM"] },
   },
+  {
+    slug: "join-discord",
+    title: "Join the Mochimo Discord",
+    description:
+      "Join the official Mochimo Discord server at https://discord.mochimo.org/ then paste your Discord username (e.g. ronnyfahrudin) so admins can verify you joined.",
+    category: TaskCategory.SOCIAL,
+    points: 50,
+    proofType: ProofType.TEXT,
+    maxPerUser: 1,
+    autoApprove: false,
+    meta: { joinUrl: "https://discord.mochimo.org/", platform: "discord" },
+  },
+  {
+    slug: "join-telegram",
+    title: "Join the Mochimo Telegram chat",
+    description:
+      "Join the Mochimo crypto chat on Telegram at https://t.me/mochimocryptochat then paste your @username (e.g. @ronnyfahrudin) so admins can verify you joined.",
+    category: TaskCategory.SOCIAL,
+    points: 50,
+    proofType: ProofType.TEXT,
+    maxPerUser: 1,
+    autoApprove: false,
+    meta: { joinUrl: "https://t.me/mochimocryptochat", platform: "telegram" },
+  },
+  {
+    slug: "follow-youtube",
+    title: "Subscribe to the Mochimo YouTube channel",
+    description:
+      "Subscribe to the Mochimo YouTube channel at https://www.youtube.com/channel/UCFW0_JZR32gMvEtJQ3YE0KA then paste your YouTube channel name or URL so admins can verify.",
+    category: TaskCategory.SOCIAL,
+    points: 50,
+    proofType: ProofType.TEXT,
+    maxPerUser: 1,
+    autoApprove: false,
+    meta: {
+      joinUrl: "https://www.youtube.com/channel/UCFW0_JZR32gMvEtJQ3YE0KA",
+      platform: "youtube",
+    },
+  },
+  {
+    slug: "follow-instagram",
+    title: "Follow Mochimo on Instagram",
+    description:
+      "Follow @mochimoquantum on Instagram at https://www.instagram.com/mochimoquantum then paste your Instagram username (e.g. @ronnyfahrudin) so admins can verify.",
+    category: TaskCategory.SOCIAL,
+    points: 50,
+    proofType: ProofType.TEXT,
+    maxPerUser: 1,
+    autoApprove: false,
+    meta: {
+      joinUrl: "https://www.instagram.com/mochimoquantum",
+      platform: "instagram",
+    },
+  },
+  {
+    slug: "follow-tiktok",
+    title: "Follow Mochimo on TikTok",
+    description:
+      "Follow @mochimoarmy12 on TikTok at https://www.tiktok.com/@mochimoarmy12 then paste your TikTok username (e.g. @ronnyfahrudin) so admins can verify.",
+    category: TaskCategory.SOCIAL,
+    points: 50,
+    proofType: ProofType.TEXT,
+    maxPerUser: 1,
+    autoApprove: false,
+    meta: {
+      joinUrl: "https://www.tiktok.com/@mochimoarmy12",
+      platform: "tiktok",
+    },
+  },
 
   // ───────── CONTENT ─────────
   {

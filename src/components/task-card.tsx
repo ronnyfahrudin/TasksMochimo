@@ -16,7 +16,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Check, Clock, Loader2 } from "lucide-react";
+import { Check, Clock, Loader2, ExternalLink } from "lucide-react";
 
 export type TaskCardData = {
   id: string;
@@ -41,6 +41,30 @@ const CATEGORY_STYLE: Record<TaskCardData["category"], string> = {
   DAILY: "bg-neon/15 text-neon border-neon/30",
 };
 
+function Linkify({ text }: { text: string }) {
+  const parts = text.split(/(https?:\/\/[^\s)]+)/g);
+  return (
+    <>
+      {parts.map((part, i) =>
+        /^https?:\/\//.test(part) ? (
+          <a
+            key={i}
+            href={part}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-neon hover:underline inline-flex items-center gap-0.5 break-all"
+          >
+            {part}
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
 function formatRemaining(target: Date): string {
   const ms = +target - Date.now();
   if (ms <= 0) return "available now";
@@ -58,11 +82,12 @@ export function TaskCard({ task }: { task: TaskCardData }) {
   const [proofText, setProofText] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const cooldownActive =
-    task.cooldownUntil && new Date(task.cooldownUntil).getTime() > Date.now();
+  const cooldownActive = Boolean(
+    task.cooldownUntil && new Date(task.cooldownUntil).getTime() > Date.now(),
+  );
   const maxedOut =
     task.maxPerUser != null && task.completedCount >= task.maxPerUser;
-  const done = maxedOut; // fully completed and won't ever be available again
+  const done = maxedOut;
   const locked = maxedOut || cooldownActive;
 
   // For "NONE" proof (daily check-in) and "AUTO" tasks, skip the dialog and
@@ -131,7 +156,9 @@ export function TaskCard({ task }: { task: TaskCardData }) {
           </div>
         </div>
         <CardTitle className="mt-2 text-base">{task.title}</CardTitle>
-        <CardDescription>{task.description}</CardDescription>
+        <CardDescription>
+          <Linkify text={task.description} />
+        </CardDescription>
       </CardHeader>
       <CardContent className="flex-1 text-xs text-muted-foreground space-y-1">
         {task.maxPerUser ? (

@@ -69,7 +69,6 @@ export function MochimoAddressForm({
           id="mcm-hex-d"
           spellCheck={false}
           autoComplete="off"
-          placeholder="0xd9c0c06c5383eb5cc0159f618101003d3b7abe84"
           value={hex}
           onChange={(e) => setHex(e.target.value)}
           className="font-mono text-xs"
@@ -83,7 +82,6 @@ export function MochimoAddressForm({
           id="mcm-tag-d"
           spellCheck={false}
           autoComplete="off"
-          placeholder="226qEKxKSKCXMVtmBFVPKAz7H5aVjgH"
           value={tag}
           onChange={(e) => setTag(e.target.value)}
           className="font-mono text-xs"

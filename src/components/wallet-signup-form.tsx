@@ -94,18 +94,16 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
         value={values.username}
         error={errors.username}
         onChange={(v) => set("username", v)}
-        placeholder="ronnyfahrudin"
       />
 
       {/* 2. Account tag */}
       <Row
         id="su-tag"
         label="Mochimo account tag"
-        hint="Base58 tag shown on Mochiscan, e.g. 226qEKxKSK…"
+        hint="Base58 tag shown on Mochiscan."
         value={values.tag}
         error={errors.tag}
         onChange={(v) => set("tag", v)}
-        placeholder="226qEKxKSKCXMVtmBFVPKAz7H5aVjgH"
         mono
       />
 
@@ -127,7 +125,6 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
           id="su-hex"
           autoComplete="off"
           spellCheck={false}
-          placeholder="0xd9c0c06c5383eb5cc0159f618101003d3b7abe84"
           value={values.hex}
           onChange={(e) => set("hex", e.target.value)}
           className="font-mono text-xs"
@@ -146,7 +143,6 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
         value={values.password}
         error={errors.password}
         onChange={(v) => set("password", v)}
-        placeholder="••••••••"
         type="password"
       />
 
@@ -157,7 +153,6 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
         value={values.confirmPassword}
         error={errors.confirmPassword}
         onChange={(v) => set("confirmPassword", v)}
-        placeholder="••••••••"
         type="password"
       />
 

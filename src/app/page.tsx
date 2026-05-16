@@ -1,9 +1,9 @@
 import Image from "next/image";
 import Link from "next/link";
-import { auth, signIn } from "@/lib/auth";
+import { auth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { ArrowRight, ShieldCheck, Sparkles, Trophy, Users } from "lucide-react";
+import { ArrowRight, ShieldCheck, Sparkles, Trophy, Users, Wallet } from "lucide-react";
 
 export default async function HomePage() {
   const session = await auth();
@@ -44,21 +44,24 @@ export default async function HomePage() {
                 </Link>
               </Button>
             ) : (
-              <form
-                action={async () => {
-                  "use server";
-                  await signIn("twitter", { redirectTo: "/dashboard" });
-                }}
-              >
-                <Button type="submit" size="lg">
-                  Connect X to start <ArrowRight className="h-4 w-4" />
-                </Button>
-              </form>
+              <Button asChild size="lg">
+                <Link href="/signup">
+                  <Wallet className="h-4 w-4" />
+                  Sign up with Mochimo wallet
+                </Link>
+              </Button>
             )}
             <Button asChild size="lg" variant="outline">
               <Link href="/tasks">Browse tasks</Link>
             </Button>
           </div>
+
+          {!session?.user && (
+            <p className="mt-4 text-xs text-muted-foreground">
+              We verify your address on-chain via the Mochimo Mesh API before
+              creating your account. X (Twitter) is optional.
+            </p>
+          )}
         </div>
       </section>
 

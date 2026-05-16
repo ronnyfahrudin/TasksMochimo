@@ -1,9 +1,9 @@
 import Link from "next/link";
 import Image from "next/image";
-import { auth, signIn, signOut } from "@/lib/auth";
+import { auth, signOut } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { LogIn, LogOut } from "lucide-react";
+import { LogOut, Wallet } from "lucide-react";
 import { formatPoints } from "@/lib/utils";
 
 export async function Navbar() {
@@ -60,17 +60,12 @@ export async function Navbar() {
               </form>
             </>
           ) : (
-            <form
-              action={async () => {
-                "use server";
-                await signIn("twitter", { redirectTo: "/dashboard" });
-              }}
-            >
-              <Button type="submit" size="sm">
-                <LogIn className="h-4 w-4" />
-                Connect X
-              </Button>
-            </form>
+            <Button asChild size="sm">
+              <Link href="/signup">
+                <Wallet className="h-4 w-4" />
+                Sign up
+              </Link>
+            </Button>
           )}
         </div>
       </div>
