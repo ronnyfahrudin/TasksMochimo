@@ -1,33 +1,162 @@
 # Mochimo Tasks
 
-Quest board for the Mochimo ($MCM) quantum-resistant blockchain. Users
-connect X (Twitter), add a Mochimo wallet address, and complete social /
-content / referral / daily tasks to earn points and climb a monthly
-leaderboard.
+Quest board for the Mochimo ($MCM) quantum-resistant blockchain. Users sign up
+with their Mochimo wallet (verified on-chain via the Mochimo Mesh API), set a
+username + password, and complete social / content / referral / daily tasks to
+earn points and climb a monthly leaderboard. X (Twitter) connect is optional —
+needed only for social tasks.
 
 **Stack:** Next.js 15 (App Router) · TypeScript · Tailwind · shadcn/ui ·
-Prisma · Supabase Postgres · NextAuth v5 (Twitter OAuth 2.0) ·
-Anthropic Claude / xAI Grok for content moderation · Vercel Cron.
+Prisma · PostgreSQL (local or Supabase) · Auth.js v5 (custom credentials +
+optional Twitter OAuth 2.0) · scrypt password hashing · Mochimo Mesh API
+(Rosetta) · Anthropic Claude / xAI Grok for content moderation · Vercel Cron
+or Supabase pg_cron.
 
 ---
 
-## Quickstart
+## Quickstart (local PostgreSQL)
 
 ```bash
-git init && git add -A && git commit -m "init"
-pnpm install        # or npm install / yarn
+# 1. Install
+npm install
 
+# 2. Create local Postgres role + DB (one-time)
+sudo -u postgres psql <<'SQL'
+ALTER DATABASE template1 REFRESH COLLATION VERSION;  -- if you hit collation mismatch
+CREATE USER mochimo WITH PASSWORD 'mochimo123' CREATEDB;
+CREATE DATABASE mochimo_tasks OWNER mochimo;
+GRANT ALL PRIVILEGES ON DATABASE mochimo_tasks TO mochimo;
+SQL
+
+# 3. Env
 cp .env.example .env.local
-# fill in: DATABASE_URL, AUTH_SECRET, AUTH_TWITTER_ID / _SECRET,
-# ANTHROPIC_API_KEY (or XAI_API_KEY), CRON_SECRET, ADMIN_TWITTER_HANDLES.
+# .env.local already points at the local DB; just fill in AUTH_SECRET:
+echo "AUTH_SECRET=\"$(openssl rand -base64 32)\"" >> .env.local
 
-pnpm prisma migrate dev --name init
-pnpm db:seed
-pnpm dev
+# Prisma CLI reads .env, Next.js reads .env.local — symlink them:
+ln -sf .env.local .env
+
+# 4. Apply schema + seed tasks
+npx prisma migrate dev --name init
+npm run db:seed
+
+# 5. Run
+npm run dev
 ```
 
-Open <http://localhost:3000> → sign in with X → add your Mochimo address
-on the dashboard → complete tasks.
+Open <http://localhost:3000>, click **Sign up with Mochimo wallet**, fill the
+5-field form (username · tag · hex · password · confirm). The hex address is
+verified on-chain through the Mochimo Mesh API before the account is created.
+
+---
+
+## Sign-up & sign-in flow
+
+The app supports **two** sign-in methods that share the same User table:
+
+### Username + password (primary)
+
+`/signup` collects, in this exact order:
+
+1. **Username** — 3–24 chars, `[a-zA-Z0-9_]`, lowercased server-side
+2. **Mochimo account tag** — base58 (display form from
+   [Mochiscan](https://mochiscan.org/))
+3. **Hex address** — 40 hex chars, with optional `0x` prefix; sent to the
+   Mochimo Mesh API for on-chain verification before account creation
+4. **Password** — ≥8 chars, scrypt-hashed (`N=2^15, r=8, p=1, maxmem=64MB`)
+5. **Confirm password**
+
+Sign-in at `/signin` posts `{ username, password }` to
+[`/api/auth/credentials-signin`](src/app/api/auth/credentials-signin/route.ts),
+which verifies via `scryptSync` in constant time (also runs against a
+placeholder hash on unknown usernames so timing can't enumerate users),
+creates a `Session` row, and sets the Auth.js `authjs.session-token` cookie.
+
+### Twitter OAuth 2.0 (optional)
+
+If `AUTH_TWITTER_ID/SECRET` are set, `/signin` also exposes a "Continue with
+X" button. Required for social tasks that reference a Twitter handle (admin
+allow-list via `ADMIN_TWITTER_HANDLES` only works for Twitter sign-in).
+
+---
+
+## Mochimo wallet binding (Mesh-verified)
+
+[src/lib/mochimo.ts](src/lib/mochimo.ts) handles both address formats:
+
+| Form | Example | Source |
+| --- | --- | --- |
+| Hex (canonical) | `0xd9c0c06c5383eb5cc0159f618101003d3b7abe84` | sent to Mesh API |
+| Base58 tag | `226qEKxKSKCXMVtmBFVPKAz7H5aVjgH` | display on dashboard / leaderboard |
+
+`verifyMochimoAddressOnchain()` POSTs the hex to
+`{MOCHIMO_MESH_URL}/account/balance` (Rosetta 1.4.13). It returns:
+
+- `ok: true` — Mesh accepted the address (with balance / block index)
+- `ok: false` — Mesh explicitly rejected the format (sign-up blocked)
+- `ok: "unknown"` — network/timeout → account still created, flagged for
+  admin review (soft-fail so flaky upstream never locks users out)
+
+Code 4 "Account not found" is treated as **valid format, zero balance** — a
+fresh wallet may exist on Mochiscan but have no on-chain history yet.
+
+---
+
+## Tasks & duplicate-tweet protection
+
+Seeded by [prisma/seed.ts](prisma/seed.ts) — **11 starter tasks** across
+SOCIAL, CONTENT, REFERRAL, and DAILY categories. Daily Twitter tasks
+(check-in, like, retweet, quote) reset every 20 hours per user.
+
+### Submit flow
+
+`POST /api/tasks/submit` in
+[src/app/api/tasks/submit/route.ts](src/app/api/tasks/submit/route.ts):
+
+1. Auth + ban check.
+2. Wallet required for non-DAILY tasks.
+3. **Tweet URL normalization**: any submission shaped like a tweet URL
+   (x.com, twitter.com, mobile, with tracking params, `/photo/1` suffix,
+   etc.) is run through `extractTweetId()` in
+   [src/lib/twitter.ts](src/lib/twitter.ts) and stored in canonical form
+   `https://x.com/{user}/status/{id}`.
+4. **Tweet-ID dedup across the whole system**, including `FLAGGED` status —
+   the same tweet can never be claimed twice, by anyone, in any format.
+5. URL pattern validation (tweet / youtube / medium regexes).
+6. `maxPerUser` and `cooldownHrs` enforcement (DAILY tasks → 20h cooldown).
+7. AUTO/NONE tasks (daily check-in, referral credit) → instant
+   `AUTO_APPROVED` + points awarded.
+8. Otherwise: AI moderation → `auto-approve >= 0.85`, `flag <= 0.2`,
+   otherwise PENDING for admin.
+9. Atomic `awardPoints()` increments `points` *and* `lifetimePoints` and
+   writes a `PointsLedger` row tagged with `YYYY-MM`.
+
+### Admin moderation
+
+`/admin/submissions` lists PENDING / FLAGGED. Each row
+([src/components/review-row.tsx](src/components/review-row.tsx)) shows the
+AI verdict + score and offers **Re-moderate**, **Approve**, **Reject**.
+
+---
+
+## Monthly leaderboard reset
+
+[src/app/api/cron/reset-leaderboard/route.ts](src/app/api/cron/reset-leaderboard/route.ts):
+
+- Auth via `Authorization: Bearer ${CRON_SECRET}`
+- Snapshots `User.points > 0` into `LeaderboardSnapshot` (period = month
+  being closed), then zeroes `User.points` in one transaction.
+  `lifetimePoints` is preserved.
+- Idempotent — re-running for the same period is a no-op.
+
+Schedule it with whichever you prefer:
+
+| Option | Config |
+| --- | --- |
+| **Vercel Cron** | `vercel.json` already wires `5 0 1 * *`. Vercel attaches `CRON_SECRET` automatically in prod. |
+| **Supabase pg_cron** | `select cron.schedule('reset-leaderboard', '5 0 1 * *', $$ select net.http_post(url := '<APP_URL>/api/cron/reset-leaderboard', headers := '{"Authorization":"Bearer <CRON_SECRET>"}'::jsonb); $$);` |
+| **Supabase Edge Function** | Deploy [supabase/functions/reset-leaderboard/index.ts](supabase/functions/reset-leaderboard/index.ts) then add a Cron schedule in the Supabase dashboard. |
+| **Netlify Scheduled Functions** | A 5-line function in `netlify/functions/` calling the API works; minimum interval is 5 minutes. |
 
 ---
 
@@ -36,168 +165,121 @@ on the dashboard → complete tasks.
 ```
 src/
 ├── app/
-│   ├── page.tsx                       # landing (hero + features)
-│   ├── signin/page.tsx                # auth landing (?ref=CODE supported)
-│   ├── dashboard/page.tsx             # points, wallet, referral, history
-│   ├── tasks/page.tsx                 # grid with category tabs
-│   ├── leaderboard/page.tsx           # monthly / all-time / last-month
-│   ├── admin/page.tsx                 # admin home with KPIs
-│   ├── admin/submissions/page.tsx     # moderation queue
-│   ├── globals.css                    # dark theme + neon-green tokens
+│   ├── page.tsx                          # landing (hero + features)
+│   ├── signup/page.tsx                   # wallet-first 5-field form
+│   ├── signin/page.tsx                   # username+password + optional X
+│   ├── dashboard/page.tsx                # points, wallet (tag + hex), referral, history
+│   ├── tasks/page.tsx                    # category tabs + stat banner
+│   ├── leaderboard/page.tsx              # monthly / all-time / last-month
+│   ├── admin/page.tsx                    # KPIs
+│   ├── admin/submissions/page.tsx        # moderation queue
+│   ├── globals.css                       # dark neon-green theme
 │   ├── layout.tsx
 │   └── api/
-│       ├── auth/[...nextauth]/route.ts
-│       ├── user/mochimo-address/route.ts
-│       ├── tasks/submit/route.ts
-│       ├── admin/submissions/[id]/route.ts
-│       ├── moderate/route.ts          # admin-only manual AI re-mod
+│       ├── auth/[...nextauth]/route.ts   # NextAuth handlers (for Twitter OAuth)
+│       ├── auth/wallet-signup/route.ts   # custom 5-field credential signup
+│       ├── auth/credentials-signin/route.ts # username+password signin
+│       ├── user/mochimo-address/route.ts # update wallet after signup
+│       ├── tasks/submit/route.ts         # submit proof + dedup + AI mod
+│       ├── admin/submissions/[id]/route.ts # approve / reject
+│       ├── moderate/route.ts             # admin manual AI re-mod
 │       ├── referral/claim/route.ts
 │       └── cron/reset-leaderboard/route.ts
 ├── components/
-│   ├── ui/…                           # shadcn primitives
+│   ├── ui/…                              # shadcn primitives
 │   ├── navbar.tsx
-│   ├── task-card.tsx                  # client: opens submit dialog
-│   ├── mochimo-address-form.tsx
+│   ├── task-card.tsx                     # client: Done badge, cooldown countdown, one-click for NONE/AUTO
+│   ├── wallet-signup-form.tsx            # 5-field signup
+│   ├── credentials-signin-form.tsx       # username+password signin
+│   ├── mochimo-address-form.tsx          # dashboard tag+hex form
 │   ├── referral-card.tsx
 │   ├── referral-capture.tsx
-│   └── review-row.tsx                 # admin row w/ approve/reject/remod
+│   └── review-row.tsx
 ├── lib/
 │   ├── prisma.ts
-│   ├── auth.ts                        # NextAuth v5 (Twitter) + role
-│   ├── mochimo.ts                     # base58 address validation
-│   ├── points.ts                      # awardPoints() tx helper
-│   ├── ai-moderate.ts                 # Claude / Grok moderator
-│   ├── supabase.ts                    # service-role client
-│   └── utils.ts                       # cn(), currentPeriod(), etc.
-└── middleware.ts                      # /dashboard /tasks /admin guards
-prisma/schema.prisma                   # User, Task, Submission, …, AppState
-prisma/seed.ts                         # 9 starter tasks
-supabase/functions/reset-leaderboard/  # alt cron via Supabase
-vercel.json                            # Vercel Cron: 5 0 1 * *
+│   ├── auth.ts                           # Auth.js v5 (Twitter) + role helpers
+│   ├── password.ts                       # scrypt hash/verify (node:crypto)
+│   ├── mochimo.ts                        # tag/hex schemas + Mesh verifier
+│   ├── twitter.ts                        # tweet ID extract + canonical URL
+│   ├── points.ts                         # awardPoints() tx helper
+│   ├── ai-moderate.ts                    # Claude/Grok moderator
+│   ├── supabase.ts                       # service-role client (optional)
+│   └── utils.ts                          # cn(), currentPeriod(), etc.
+├── middleware.ts.bak                     # disabled — Prisma adapter incompatible with Edge
+prisma/schema.prisma                      # User (username/passwordHash/mochimoAddress/mochimoTag), Task, Submission, …
+prisma/seed.ts                            # 11 starter tasks
+supabase/functions/reset-leaderboard/     # alt cron via Supabase
+vercel.json                               # Vercel Cron: 5 0 1 * *
+netlify.toml                              # Netlify build config
 ```
+
+Note: `middleware.ts` is intentionally renamed to `.bak`. NextAuth middleware
+with the Prisma adapter runs on Edge and can't query the DB; pages already
+guard with their own `auth()` + `redirect()` so the middleware was redundant.
 
 ---
 
-## How features fit together
+## Dark neon-green theme
 
-### Auth & sign-up flow
+Always-dark HSL tokens in [src/app/globals.css](src/app/globals.css), Tailwind
+extensions in [tailwind.config.ts](tailwind.config.ts):
 
-- `next-auth@5` with `@auth/prisma-adapter` (database sessions).
-- The Twitter provider captures `twitterId` and `twitterHandle` in the
-  `signIn` event ([src/lib/auth.ts](src/lib/auth.ts)). Handles in
-  `ADMIN_TWITTER_HANDLES` are auto-promoted to `ADMIN`.
-- After sign-in users land on `/dashboard`. If they came in via
-  `/signin?ref=CODE`, `<ReferralCapture>` posts the code to
-  `/api/referral/claim`, linking `referredById` exactly once.
-
-### Mochimo wallet binding
-
-[src/lib/mochimo.ts](src/lib/mochimo.ts) validates a 32–64-character
-base58 string (Bitcoin/Mochimo Mesh alphabet — excludes `0`, `O`, `I`,
-`l`). The `/api/user/mochimo-address` route:
-
-1. Rejects duplicates across accounts.
-2. Saves the address.
-3. **On the user's first wallet save**, if they were referred, credits the
-   referrer a 100-pt `AUTO_APPROVED` submission to the `refer-friend`
-   task — so the bounty only fires for serious sign-ups.
-
-### Task submission + AI moderation
-
-`POST /api/tasks/submit` (see
-[src/app/api/tasks/submit/route.ts](src/app/api/tasks/submit/route.ts)):
-
-1. Auth + ban check.
-2. Wallet required for non-DAILY tasks.
-3. Validates proof URL pattern (tweet / youtube / medium regexes).
-4. Enforces `maxPerUser` and `cooldownHrs`.
-5. Rejects duplicate proof URLs system-wide.
-6. `AUTO`/`NONE` or `autoApprove` tasks → `AUTO_APPROVED` + points.
-7. Otherwise: calls `moderateContent()` with the proof.
-   - `verdict=approve && score >= 0.85` → auto-approve.
-   - `verdict=reject || score <= 0.2` → `FLAGGED` (admin reviews).
-   - Otherwise → `PENDING` (admin reviews).
-8. Atomic `awardPoints()` increments `points` *and* `lifetimePoints` and
-   writes a `PointsLedger` row tagged with the current `YYYY-MM` period.
-
-Moderator prompt is in [src/lib/ai-moderate.ts](src/lib/ai-moderate.ts).
-It defaults to Claude (Haiku 4.5) and falls back to xAI Grok. With *no*
-key configured it returns `verdict: "review"` so every submission lands
-in the admin queue (never silently approved).
-
-### Admin moderation
-
-`/admin/submissions` lists `PENDING` or `FLAGGED` queues. Each row
-([src/components/review-row.tsx](src/components/review-row.tsx))
-exposes: open proof URL, view AI verdict + score, **Re-moderate**
-button (re-runs the AI), **Approve**, and **Reject (with reason)**.
-Decisions hit `PATCH /api/admin/submissions/[id]`, which uses a Prisma
-transaction to update the submission and call `awardPoints()`.
-
-### Referral system
-
-Each user has a permanent `referralCode` (cuid). The dashboard renders
-`{NEXT_PUBLIC_APP_URL}/signin?ref={code}`. Sign-in preserves `ref`
-through the OAuth redirect to `/dashboard?ref=…`, where
-`<ReferralCapture>` links the relationship. Points are only awarded once
-the referred user binds a Mochimo wallet (anti-bot).
-
-### Monthly leaderboard reset
-
-[src/app/api/cron/reset-leaderboard/route.ts](src/app/api/cron/reset-leaderboard/route.ts):
-
-- Authenticated via `Authorization: Bearer ${CRON_SECRET}`.
-- Snapshots every user with `points > 0` into `LeaderboardSnapshot`
-  (period = the month being closed), then zeroes `User.points` in a
-  single transaction. `lifetimePoints` is preserved.
-- Idempotent: re-running for the same period is a no-op.
-
-Two ways to schedule:
-
-| Option | Where to configure |
-| --- | --- |
-| **Vercel Cron** | `vercel.json` already wires `5 0 1 * *` → `/api/cron/reset-leaderboard`. Vercel automatically attaches the `CRON_SECRET` header in production. |
-| **Supabase Edge Function** | Deploy [supabase/functions/reset-leaderboard/index.ts](supabase/functions/reset-leaderboard/index.ts), set `APP_URL` and `CRON_SECRET` env vars in the Supabase project, then add a Cron schedule from the dashboard. |
-
-### Dark neon-green theme
-
-Always-dark CSS variables in
-[src/app/globals.css](src/app/globals.css), Tailwind tokens in
-[tailwind.config.ts](tailwind.config.ts). Key utilities:
-
-- `text-glow` — neon text shadow.
-- `gradient-text-neon` — three-stop gradient text.
-- `bg-grid` — subtle grid backdrop.
-- `shadow-neon` / `shadow-neon-sm` / `animate-pulse-neon`.
+- `text-glow` — neon text shadow
+- `gradient-text-neon` — three-stop gradient
+- `bg-grid` — subtle grid backdrop
+- `shadow-neon` / `shadow-neon-sm` / `animate-pulse-neon`
 
 ---
 
 ## Common ops
 
 ```bash
-# Manually trigger a reset (e.g. for testing)
+# Reset everything (drops DB, re-applies migrations, re-seeds)
+npx prisma migrate reset --force
+
+# Trigger leaderboard reset manually (testing)
 curl -X POST http://localhost:3000/api/cron/reset-leaderboard \
   -H "Authorization: Bearer $CRON_SECRET"
 
-# Promote an admin by Twitter handle
-echo 'ADMIN_TWITTER_HANDLES="myhandle,otherhandle"' >> .env.local
-# (or update role manually:)
-pnpm prisma studio  # User → role: ADMIN
+# Promote a credentials user to admin
+npx prisma studio  # User → set role: ADMIN
 
 # Re-seed tasks (idempotent upsert by slug)
-pnpm db:seed
+npm run db:seed
+
+# Inspect DB
+npx prisma studio
+# or
+PGPASSWORD=mochimo123 psql -h localhost -U mochimo -d mochimo_tasks
 ```
 
 ---
 
 ## Security notes
 
-- `SUPABASE_SERVICE_ROLE_KEY` is server-only and never exposed to the
-  client. `lib/supabase.ts` uses it for admin operations only.
-- All admin routes are gated in `middleware.ts` *and* re-checked in each
-  API/page handler (defense in depth).
-- Duplicate proof URLs are rejected server-side so the same tweet can't
-  be farmed across accounts.
-- `bannedAt` short-circuits `POST /api/tasks/submit` before any work.
-- The AI moderator is a heuristic — never trust it for final approval of
-  >100-pt tasks; default to manual review.
+- **Password hashing** is scrypt with OWASP-recommended params. Format is
+  `scrypt$N$r$p$saltHex$hashHex` so params can be rotated without breaking
+  existing logins. Verify path always runs against a placeholder hash on
+  unknown usernames so timing won't leak account existence.
+- **Cookies** are HttpOnly + SameSite=Lax. In production (`AUTH_URL` starts
+  with `https://`) they get the `__Secure-` prefix.
+- **`SUPABASE_SERVICE_ROLE_KEY`** is server-only — never exposed to the
+  browser. `lib/supabase.ts` uses it for admin operations only.
+- **Admin routes** are checked in every API/page handler (no middleware).
+- **Duplicate proof URLs** rejected by tweet-ID across all statuses
+  including FLAGGED, so a previously-flagged tweet can't be recycled.
+- **`bannedAt`** short-circuits `POST /api/tasks/submit` before any work.
+- The AI moderator is a heuristic — don't trust it as final approval for
+  high-value tasks (>100 pts); rely on manual review.
+
+### Known prototype gaps
+
+- **Wallet ownership** isn't proven — anyone who knows your hex can claim
+  the wallet first. Production needs a signed-message challenge (user signs
+  with their Mochimo private key, server verifies).
+- **Tweet freshness** isn't verified — daily tasks accept any tweet from
+  @mochimo's history, not just today's. Needs X API integration to check
+  `created_at`.
+- **Username uniqueness** is case-folded server-side but the same person
+  can sign up multiple times with different usernames + different wallets.
+  Adequate for a faucet program; tighten if needed.
