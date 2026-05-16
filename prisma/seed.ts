@@ -109,16 +109,43 @@ const tasks = [
   },
   {
     slug: "daily-like-mcm-post",
-    title: "Like the daily Mochimo post",
+    title: "Daily: Like @mochimo's latest tweet",
     description:
-      "Like the most recent @mochimo tweet today and submit the tweet URL.",
+      "Like the most recent @mochimo tweet today. Paste the tweet URL — duplicate tweets are rejected.",
     category: TaskCategory.DAILY,
     points: 15,
+    proofType: ProofType.TWEET_URL,
+    proofUrlHint: "https://x.com/mochimo/status/...",
+    cooldownHrs: 20,
+    maxPerUser: null,
+    autoApprove: false,
+  },
+  {
+    slug: "daily-retweet-mcm",
+    title: "Daily: Retweet @mochimo today",
+    description:
+      "Retweet a fresh @mochimo tweet and submit the URL of your retweet. One tweet per day, no repeats.",
+    category: TaskCategory.DAILY,
+    points: 25,
     proofType: ProofType.TWEET_URL,
     proofUrlHint: "https://x.com/",
     cooldownHrs: 20,
     maxPerUser: null,
     autoApprove: false,
+  },
+  {
+    slug: "daily-quote-mcm",
+    title: "Daily: Quote-tweet @mochimo with #Mochimo",
+    description:
+      "Quote-tweet a @mochimo post today with your own commentary, include #Mochimo or $MCM. Submit the quote-tweet URL.",
+    category: TaskCategory.DAILY,
+    points: 40,
+    proofType: ProofType.TWEET_URL,
+    proofUrlHint: "https://x.com/",
+    cooldownHrs: 20,
+    maxPerUser: null,
+    autoApprove: false,
+    meta: { hashtags: ["Mochimo", "MCM"] },
   },
 ];
 

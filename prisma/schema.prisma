@@ -62,12 +62,20 @@ model User {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
+  // Credentials sign-up (username + password)
+  username       String?  @unique
+  passwordHash   String?
+
   // Twitter
   twitterId      String?  @unique
   twitterHandle  String?  @unique
 
-  // Mochimo wallet address (base58, validated app-side)
+  // Mochimo wallet: hex form (canonical, Mesh-verified), 40 lowercase hex chars
+  // without "0x" prefix. Used for on-chain checks and payouts.
   mochimoAddress String?  @unique
+  // Mochimo wallet: base58 tag form (display), e.g. "226qEKxKSKCXMVtmBFVPKAz7H5aVjgH"
+  // Used for showing the user a Mochiscan-friendly identifier.
+  mochimoTag     String?  @unique
 
   // Points (current period — reset every month). lifetimePoints never resets.
   points         Int      @default(0)

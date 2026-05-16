@@ -31,6 +31,7 @@ export default async function DashboardPage({
         name: true,
         twitterHandle: true,
         mochimoAddress: true,
+        mochimoTag: true,
         points: true,
         lifetimePoints: true,
         referralCode: true,
@@ -98,13 +99,28 @@ export default async function DashboardPage({
           <CardHeader>
             <CardTitle>Mochimo wallet</CardTitle>
             <CardDescription>
-              {user.mochimoAddress
-                ? `Connected: ${shortAddress(user.mochimoAddress)}`
-                : "Required to receive payouts. Base58 (no 0/O/I/l)."}
+              {user.mochimoAddress ? (
+                <span className="block space-y-0.5">
+                  <span className="block">
+                    Hex:{" "}
+                    <code className="text-neon">0x{shortAddress(user.mochimoAddress)}</code>
+                  </span>
+                  {user.mochimoTag && (
+                    <span className="block">
+                      Tag: <code className="text-neon">{user.mochimoTag}</code>
+                    </span>
+                  )}
+                </span>
+              ) : (
+                "Required to receive payouts. Paste both hex (verified on-chain) and base58 tag."
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <MochimoAddressForm initial={user.mochimoAddress} />
+            <MochimoAddressForm
+              initialHex={user.mochimoAddress}
+              initialTag={user.mochimoTag}
+            />
           </CardContent>
         </Card>
 
