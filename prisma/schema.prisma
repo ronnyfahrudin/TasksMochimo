@@ -1,0 +1,220 @@
+// Mochimo Tasks - Prisma schema
+// Postgres (Supabase). NextAuth via @auth/prisma-adapter.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── NextAuth (Auth.js v5) models ─────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Domain models ────────────────────────────────────────────────────────────
+
+model User {
+  id             String   @id @default(cuid())
+  name           String?
+  email          String?  @unique
+  emailVerified  DateTime?
+  image          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Twitter
+  twitterId      String?  @unique
+  twitterHandle  String?  @unique
+
+  // Mochimo wallet address (base58, validated app-side)
+  mochimoAddress String?  @unique
+
+  // Points (current period — reset every month). lifetimePoints never resets.
+  points         Int      @default(0)
+  lifetimePoints Int      @default(0)
+
+  // Referral
+  referralCode   String   @unique @default(cuid())
+  referredById   String?
+  referredBy     User?    @relation("Referrals", fields: [referredById], references: [id])
+  referrals      User[]   @relation("Referrals")
+
+  role           UserRole @default(USER)
+  bannedAt       DateTime?
+  bannedReason   String?
+
+  accounts       Account[]
+  sessions       Session[]
+  submissions    Submission[]
+  pointsLedger   PointsLedger[]
+  leaderboardRanks LeaderboardSnapshot[]
+
+  @@index([points])
+  @@index([lifetimePoints])
+  @@index([referredById])
+}
+
+enum UserRole {
+  USER
+  MODERATOR
+  ADMIN
+}
+
+model Task {
+  id           String       @id @default(cuid())
+  slug         String       @unique
+  title        String
+  description  String       @db.Text
+  category     TaskCategory
+  points       Int
+  proofType    ProofType
+  // Optional URL pattern e.g. "https://x.com/" so client can pre-validate
+  proofUrlHint String?
+  // For DAILY tasks: cooldown hours between completions per user
+  cooldownHrs  Int?
+  // Maximum times a single user may complete this task overall (null = unlimited)
+  maxPerUser   Int?
+  active       Boolean      @default(true)
+  // Whether submissions auto-approve (e.g. follow tasks via API verify), or require manual review
+  autoApprove  Boolean      @default(false)
+  // Optional metadata e.g. target tweet id / hashtag / account to follow
+  meta         Json?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  submissions  Submission[]
+
+  @@index([category, active])
+}
+
+enum TaskCategory {
+  SOCIAL
+  CONTENT
+  REFERRAL
+  DAILY
+}
+
+enum ProofType {
+  TWEET_URL
+  YOUTUBE_URL
+  MEDIUM_URL
+  TEXT
+  AUTO        // verified server-side, no user proof
+  NONE
+}
+
+model Submission {
+  id            String           @id @default(cuid())
+  userId        String
+  taskId        String
+  proofUrl      String?
+  proofText     String?          @db.Text
+  status        SubmissionStatus @default(PENDING)
+  pointsAwarded Int              @default(0)
+
+  // Moderation
+  aiScore       Float?           // 0..1 confidence the proof is valid
+  aiVerdict     String?          // "approve" | "reject" | "review"
+  aiReason      String?          @db.Text
+  reviewedById  String?
+  reviewedAt    DateTime?
+  rejectReason  String?
+
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task          Task             @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([userId, taskId])
+  @@index([status, createdAt])
+  @@index([taskId, status])
+}
+
+enum SubmissionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  AUTO_APPROVED
+  FLAGGED
+}
+
+// Audit log of every points change (so we can recover from disputes / resets).
+model PointsLedger {
+  id           String   @id @default(cuid())
+  userId       String
+  delta        Int
+  reason       String
+  submissionId String?
+  period       String   // "YYYY-MM" — the monthly period this entry belongs to
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, period])
+  @@index([period])
+}
+
+// Historical leaderboard snapshot per month (taken at reset).
+model LeaderboardSnapshot {
+  id          String   @id @default(cuid())
+  period      String   // "YYYY-MM"
+  userId      String
+  rank        Int
+  points      Int
+  twitterHandle String?
+  createdAt   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([period, userId])
+  @@index([period, rank])
+}
+
+// Global single-row config / period state
+model AppState {
+  id              Int      @id @default(1)
+  currentPeriod   String   // "YYYY-MM"
+  lastResetAt     DateTime?
+  updatedAt       DateTime @updatedAt
+}

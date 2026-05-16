@@ -1,0 +1,12 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # Required so `prisma generate` runs during install on Netlify
+  PRISMA_HIDE_UPDATE_MESSAGE = "true"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+# Official Next.js adapter — Netlify auto-installs but we pin for clarity.
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
