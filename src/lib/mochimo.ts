@@ -105,6 +105,104 @@ export type MeshVerifyResult =
 
 const DEFAULT_MESH_URL = "https://api.mochimo.org";
 
+// ── Mempool watch for proof-of-ownership ────────────────────────────────────
+//
+// Forum-mochimo-style verification: instead of trusting "this hex exists on
+// chain", we wait for the user to trigger a fresh transaction FROM that hex.
+// Mesh exposes /mempool (list of pending tx hashes) + /mempool/transaction
+// (operations of a specific pending tx). For each pending tx we inspect every
+// operation's account.address — if it matches the claimed hex, we have proof
+// the wallet holder is the one initiating the action.
+//
+// Returns the tx hash that matched, or null if no match yet. Network errors
+// → null (treat as "still pending"); pages will keep polling.
+
+type RosettaTxIdentifier = { hash: string };
+type RosettaOperation = {
+  account?: { address?: string };
+  amount?: { value?: string; currency?: { symbol?: string; decimals?: number } };
+};
+
+/**
+ * Watch the Mesh mempool for a tx FROM the given hex whose operation amount
+ * matches `challengeNanoMcm` (if provided). Returns the matching tx hash or
+ * null.
+ *
+ * The challenge filter eliminates the false-positive case where the user
+ * happens to have an unrelated pending tx — only a tx with the exact amount
+ * we asked for proves ownership.
+ */
+export async function checkMempoolForAddress(
+  hexNoPrefix: string,
+  opts: {
+    challengeNanoMcm?: number;
+    meshUrl?: string;
+    network?: string;
+    timeoutMs?: number;
+  } = {},
+): Promise<string | null> {
+  const meshUrl = opts.meshUrl ?? process.env.MOCHIMO_MESH_URL ?? DEFAULT_MESH_URL;
+  const network = opts.network ?? process.env.MOCHIMO_MESH_NETWORK ?? "mainnet";
+  const timeoutMs = opts.timeoutMs ?? 8000;
+  const target = `0x${hexNoPrefix.toLowerCase()}`;
+  const networkIdentifier = { blockchain: "mochimo", network };
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const listRes = await fetch(`${meshUrl.replace(/\/$/, "")}/mempool`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({ network_identifier: networkIdentifier }),
+    });
+    if (!listRes.ok) return null;
+
+    const listData = (await listRes.json()) as {
+      transaction_identifiers?: RosettaTxIdentifier[];
+    };
+    const ids = listData.transaction_identifiers ?? [];
+    if (ids.length === 0) return null;
+
+    // Sequentially inspect — mempool is usually small for Mochimo, and
+    // parallel fan-out can rate-limit a public node.
+    for (const { hash } of ids) {
+      if (controller.signal.aborted) break;
+      const txRes = await fetch(`${meshUrl.replace(/\/$/, "")}/mempool/transaction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          network_identifier: networkIdentifier,
+          transaction_identifier: { hash },
+        }),
+      });
+      if (!txRes.ok) continue;
+      const txData = (await txRes.json()) as {
+        transaction?: { operations?: RosettaOperation[] };
+      };
+      const ops = txData.transaction?.operations ?? [];
+      const matched = ops.some((op) => {
+        if (op.account?.address?.toLowerCase() !== target) return false;
+        if (opts.challengeNanoMcm == null) return true;
+        const raw = op.amount?.value;
+        if (raw == null) return false;
+        // Operation amount may be a signed string; we compare absolute value
+        // because the same tx has +N for the recipient and -N for the sender.
+        const abs = Math.abs(Number(raw));
+        return Number.isFinite(abs) && abs === opts.challengeNanoMcm;
+      });
+      if (matched) return hash;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function verifyMochimoAddressOnchain(
   input: string,
   opts: { timeoutMs?: number; meshUrl?: string; network?: string } = {},

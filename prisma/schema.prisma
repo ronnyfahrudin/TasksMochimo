@@ -219,6 +219,33 @@ model LeaderboardSnapshot {
   @@index([period, rank])
 }
 
+/// Pending proof-of-ownership claim for a Mochimo wallet. Mirrors the
+/// forum-style flow: the user pastes hex+tag, we watch the Mochimo Mesh
+/// mempool, and when we see a transaction whose `account.address` matches
+/// the claimed hex within the claim window, we mark it verified.
+/// The user then completes signup (username + password) referencing
+/// `claimToken`.
+model WalletClaim {
+  id             String   @id @default(cuid())
+  claimToken     String   @unique // opaque token returned to the browser
+  hex            String   // 40-char lowercase, no "0x" prefix
+  tag            String
+  startedAt        DateTime @default(now())
+  expiresAt        DateTime
+  // Unique amount (in nMCM, 1 MCM = 10^9 nMCM) the user must include in the
+  // transaction. We only mark verified when we see a tx FROM `hex` with
+  // operation amount matching this challenge — eliminates the case where
+  // an unrelated background tx satisfies the claim by accident.
+  challengeNanoMcm Int
+  lastCheckedAt    DateTime?
+  verifiedAt       DateTime?
+  verifiedTxHash   String?
+  consumedAt       DateTime?
+
+  @@index([hex])
+  @@index([expiresAt])
+}
+
 // Global single-row config / period state
 model AppState {
   id              Int      @id @default(1)

@@ -44,9 +44,10 @@ npm run db:seed
 npm run dev
 ```
 
-Open <http://localhost:3000>, click **Sign up with Mochimo wallet**, fill the
-5-field form (username · tag · hex · password · confirm). The hex address is
-verified on-chain through the Mochimo Mesh API before the account is created.
+Open <http://localhost:3000>, click **Sign up with Mochimo wallet**, then walk
+the three steps: paste tag + hex → send the challenge amount from your wallet
+(auto-detected in the Mesh mempool) → pick username + password. Ownership of
+the wallet is proven on-chain before the account is created.
 
 ---
 
@@ -54,21 +55,49 @@ verified on-chain through the Mochimo Mesh API before the account is created.
 
 The app supports **two** sign-in methods that share the same User table:
 
-### Username + password (primary)
+### Wallet-first sign-up with mempool proof-of-ownership
 
-`/signup` collects, in this exact order:
+Inspired by how the Mochimo forum verifies wallet registrations, `/signup` is
+a **three-step state machine** that proves the user controls the wallet before
+the account is created — not just that the address exists on chain.
 
-1. **Username** — 3–24 chars, `[a-zA-Z0-9_]`, lowercased server-side
-2. **Mochimo account tag** — base58 (display form from
-   [Mochiscan](https://mochiscan.org/))
-3. **Hex address** — 40 hex chars, with optional `0x` prefix; sent to the
-   Mochimo Mesh API for on-chain verification before account creation
-4. **Password** — ≥8 chars, scrypt-hashed (`N=2^15, r=8, p=1, maxmem=64MB`)
-5. **Confirm password**
+**Step 1 — open a claim.** User pastes:
+- **Mochimo account tag** — base58 form (display, from
+  [Mochiscan](https://mochiscan.org/))
+- **Hex address** — 40 hex chars, with optional `0x`
 
-Sign-in at `/signin` posts `{ username, password }` to
-[`/api/auth/credentials-signin`](src/app/api/auth/credentials-signin/route.ts),
-which verifies via `scryptSync` in constant time (also runs against a
+`POST /api/wallet/start-claim` creates a `WalletClaim` row with a random
+`claimToken`, hex, tag, a random **amount challenge** (`challengeNanoMcm`,
+100–999,999 nMCM), and a 60-second `expiresAt` (`CLAIM_TTL_SEC`). The form
+switches into **verifying** state.
+
+**Step 2 — verify via mempool watch.** The form displays the wallet hex, the
+challenge amount (click-to-copy), a countdown, and instructions:
+
+> *Send EXACTLY 483,712 nMCM (= 0.000483712 MCM) from this wallet within 60
+> seconds. Any recipient — sending to yourself works. We'll auto-detect it
+> via the Mochimo Mesh mempool.*
+
+The client polls `POST /api/wallet/poll-claim` every 5 seconds. Each call:
+1. Server-side throttle (`MIN_CHECK_INTERVAL_MS = 3s`) so concurrent users
+   don't hammer the public Mesh node.
+2. `checkMempoolForAddress()` in [src/lib/mochimo.ts](src/lib/mochimo.ts)
+   fetches `/mempool` (list of pending tx hashes), then iterates
+   `/mempool/transaction` for each, comparing every operation's
+   `account.address` (lowercased) against the claim's hex with `0x` prefix
+   **and** the operation's absolute amount against `challengeNanoMcm` — so an
+   unrelated pending tx from the same wallet can't satisfy the claim.
+3. First match → `WalletClaim.verifiedAt` set + `verifiedTxHash` saved.
+
+When the poll response is `status: "verified"`, the form swaps to
+**Step 3 — set credentials**: username + password + confirm. Submit posts to
+`POST /api/auth/wallet-signup` with the `claimToken`; hex + tag are read
+from the verified claim (the client can't override them at this point),
+which is what makes the flow trustworthy. The claim is marked
+`consumedAt` so it can't be replayed.
+
+`POST /api/auth/credentials-signin` (separate from signup) verifies username
++ password via `scryptSync` in constant time (also runs against a
 placeholder hash on unknown usernames so timing can't enumerate users),
 creates a `Session` row, and sets the Auth.js `authjs.session-token` cookie.
 
@@ -104,7 +133,7 @@ fresh wallet may exist on Mochiscan but have no on-chain history yet.
 
 ## Tasks & duplicate-tweet protection
 
-Seeded by [prisma/seed.ts](prisma/seed.ts) — **11 starter tasks** across
+Seeded by [prisma/seed.ts](prisma/seed.ts) — **16 starter tasks** across
 SOCIAL, CONTENT, REFERRAL, and DAILY categories. Daily Twitter tasks
 (check-in, like, retweet, quote) reset every 20 hours per user.
 
@@ -166,7 +195,7 @@ Schedule it with whichever you prefer:
 src/
 ├── app/
 │   ├── page.tsx                          # landing (hero + features)
-│   ├── signup/page.tsx                   # wallet-first 5-field form
+│   ├── signup/page.tsx                   # wallet-first 3-step signup
 │   ├── signin/page.tsx                   # username+password + optional X
 │   ├── dashboard/page.tsx                # points, wallet (tag + hex), referral, history
 │   ├── tasks/page.tsx                    # category tabs + stat banner
@@ -177,9 +206,11 @@ src/
 │   ├── layout.tsx
 │   └── api/
 │       ├── auth/[...nextauth]/route.ts   # NextAuth handlers (for Twitter OAuth)
-│       ├── auth/wallet-signup/route.ts   # custom 5-field credential signup
+│       ├── auth/wallet-signup/route.ts   # finalize signup (consumes verified claim)
 │       ├── auth/credentials-signin/route.ts # username+password signin
-│       ├── user/mochimo-address/route.ts # update wallet after signup
+│       ├── wallet/start-claim/route.ts   # open WalletClaim (hex+tag → claimToken)
+│       ├── wallet/poll-claim/route.ts    # mempool watch poller
+│       ├── user/mochimo-address/route.ts # update wallet for Twitter users
 │       ├── tasks/submit/route.ts         # submit proof + dedup + AI mod
 │       ├── admin/submissions/[id]/route.ts # approve / reject
 │       ├── moderate/route.ts             # admin manual AI re-mod
@@ -189,7 +220,7 @@ src/
 │   ├── ui/…                              # shadcn primitives
 │   ├── navbar.tsx
 │   ├── task-card.tsx                     # client: Done badge, cooldown countdown, one-click for NONE/AUTO
-│   ├── wallet-signup-form.tsx            # 5-field signup
+│   ├── wallet-signup-form.tsx            # 3-step: wallet → mempool watch → credentials
 │   ├── credentials-signin-form.tsx       # username+password signin
 │   ├── mochimo-address-form.tsx          # dashboard tag+hex form
 │   ├── referral-card.tsx
@@ -207,7 +238,7 @@ src/
 │   └── utils.ts                          # cn(), currentPeriod(), etc.
 ├── middleware.ts.bak                     # disabled — Prisma adapter incompatible with Edge
 prisma/schema.prisma                      # User (username/passwordHash/mochimoAddress/mochimoTag), Task, Submission, …
-prisma/seed.ts                            # 11 starter tasks
+prisma/seed.ts                            # 16 starter tasks
 supabase/functions/reset-leaderboard/     # alt cron via Supabase
 vercel.json                               # Vercel Cron: 5 0 1 * *
 netlify.toml                              # Netlify build config
@@ -274,9 +305,15 @@ PGPASSWORD=mochimo123 psql -h localhost -U mochimo -d mochimo_tasks
 
 ### Known prototype gaps
 
-- **Wallet ownership** isn't proven — anyone who knows your hex can claim
-  the wallet first. Production needs a signed-message challenge (user signs
-  with their Mochimo private key, server verifies).
+- **Wallet ownership IS proven** as of the mempool-watch flow above — the
+  user must send a tx with the exact random challenge amount from the wallet
+  inside the 60-second claim window, so a pre-existing pending tx can't
+  satisfy the claim. The remaining friction is the window itself: 60 seconds
+  is tight for someone who still has to open their wallet software. Raise
+  `CLAIM_TTL_SEC` in
+  [src/app/api/wallet/start-claim/route.ts](src/app/api/wallet/start-claim/route.ts)
+  if users report timeouts — the amount challenge, not the short window, is
+  what carries the security.
 - **Tweet freshness** isn't verified — daily tasks accept any tweet from
   @mochimo's history, not just today's. Needs X API integration to check
   `created_at`.
