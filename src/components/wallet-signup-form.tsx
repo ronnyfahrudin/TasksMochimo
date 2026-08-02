@@ -14,6 +14,16 @@ type CredErrors = { username?: string; password?: string; confirmPassword?: stri
 
 const POLL_INTERVAL_MS = 5000;
 
+/** Copy to clipboard, tolerating browsers that block it outside a gesture. */
+async function copy(value: string, message: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+    toast.success(message);
+  } catch {
+    toast.info("Copy blocked by the browser — select the value and copy manually.");
+  }
+}
+
 export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
   const [step, setStep] = useState<Step>("wallet");
 
@@ -28,6 +38,8 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
   const [expiresAt, setExpiresAt] = useState<Date | null>(null);
   const [challengeNanoMcm, setChallengeNanoMcm] = useState<number | null>(null);
   const [challengeMcm, setChallengeMcm] = useState<string | null>(null);
+  const [depositTag, setDepositTag] = useState<string | null>(null);
+  const [depositHex, setDepositHex] = useState<string | null>(null);
   const [verifiedTxHash, setVerifiedTxHash] = useState<string | null>(null);
   const [verifyMsg, setVerifyMsg] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -64,7 +76,13 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
       setExpiresAt(new Date(data.expiresAt));
       setChallengeNanoMcm(data.challengeNanoMcm);
       setChallengeMcm(data.challengeMcm);
+      setDepositTag(data.depositTag);
+      setDepositHex(data.depositHex);
       setStep("verifying");
+      // Auto-copy the amount — it has to be exact, and this click is still
+      // inside the user gesture that submitted the form, so the browser
+      // allows it. Manual copy buttons remain for everything else.
+      copy(data.challengeMcm, "Amount copied — paste it as the MCM amount");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to start claim";
       toast.error(msg);
@@ -131,6 +149,8 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
     setExpiresAt(null);
     setChallengeNanoMcm(null);
     setChallengeMcm(null);
+    setDepositTag(null);
+    setDepositHex(null);
     setVerifyMsg(null);
   }
 
@@ -233,20 +253,15 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
 
           <div className="space-y-1.5">
             <div className="text-xs text-muted-foreground uppercase tracking-wider">
-              Send EXACTLY this amount
+              1 · Send EXACTLY this amount
             </div>
             <div className="flex items-center gap-2 rounded-md border border-neon/40 bg-background/60 px-3 py-2">
               <code className="flex-1 text-neon text-glow text-xl font-mono break-all">
-                {challengeNanoMcm} nMCM
+                {challengeMcm} MCM
               </code>
               <button
                 type="button"
-                onClick={() => {
-                  if (challengeNanoMcm != null) {
-                    navigator.clipboard.writeText(String(challengeNanoMcm));
-                    toast.success("Amount copied");
-                  }
-                }}
+                onClick={() => challengeMcm && copy(challengeMcm, "Amount copied")}
                 className="text-neon hover:text-neon-glow"
                 aria-label="Copy amount"
               >
@@ -254,19 +269,50 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
               </button>
             </div>
             <div className="text-[11px] text-muted-foreground">
-              = <code className="text-neon">{challengeMcm} MCM</code> · valid for 60 seconds · any recipient (sending to yourself works)
+              = <code className="text-neon">{challengeNanoMcm} nMCM</code> · the amount must
+              match to the last digit — that is what identifies you
             </div>
           </div>
 
+          <div className="space-y-1.5">
+            <div className="text-xs text-muted-foreground uppercase tracking-wider">
+              2 · To this address
+            </div>
+            <div className="flex items-center gap-2 rounded-md border border-neon/40 bg-background/60 px-3 py-2">
+              <code className="flex-1 text-neon font-mono text-sm break-all">
+                {depositTag ?? "…"}
+              </code>
+              <button
+                type="button"
+                onClick={() => depositTag && copy(depositTag, "Address copied")}
+                className="text-neon hover:text-neon-glow"
+                aria-label="Copy address"
+              >
+                <Copy className="h-4 w-4" />
+              </button>
+            </div>
+            {depositHex && (
+              <div className="text-[11px] text-muted-foreground flex items-center gap-2">
+                <span>hex:</span>
+                <code className="text-neon truncate">0x{depositHex}</code>
+                <button
+                  type="button"
+                  onClick={() => copy(`0x${depositHex}`, "Hex copied")}
+                  className="hover:text-neon shrink-0"
+                  aria-label="Copy deposit hex"
+                >
+                  <Copy className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+          </div>
+
           <div className="text-xs text-muted-foreground flex items-center gap-2 pt-1 border-t border-white/5">
-            <span>From wallet:</span>
+            <span>From your wallet:</span>
             <code className="text-neon truncate flex-1">0x{hex.replace(/^0x/i, "").toLowerCase()}</code>
             <button
               type="button"
-              onClick={() => {
-                navigator.clipboard.writeText(`0x${hex.replace(/^0x/i, "").toLowerCase()}`);
-                toast.success("Hex copied");
-              }}
+              onClick={() => copy(`0x${hex.replace(/^0x/i, "").toLowerCase()}`, "Hex copied")}
               className="hover:text-neon"
               aria-label="Copy hex"
             >

@@ -45,9 +45,14 @@ npm run dev
 ```
 
 Open <http://localhost:3000>, click **Sign up with Mochimo wallet**, then walk
-the three steps: paste tag + hex → send the challenge amount from your wallet
-(auto-detected in the Mesh mempool) → pick username + password. Ownership of
-the wallet is proven on-chain before the account is created.
+the three steps: paste tag + hex → send the exact challenge amount to the
+deposit address (auto-detected on chain) → pick username + password. Ownership
+of the wallet is proven on-chain before the account is created.
+
+Set `MOCHIMO_DEPOSIT_TAG` to a wallet **you** control before letting anyone
+sign up — that address receives the registration payments.
+
+Requires Node 18.18+ (Next.js 15 refuses to start on 18.17).
 
 ---
 
@@ -68,26 +73,41 @@ the account is created — not just that the address exists on chain.
 
 `POST /api/wallet/start-claim` creates a `WalletClaim` row with a random
 `claimToken`, hex, tag, a random **amount challenge** (`challengeNanoMcm`,
-100–999,999 nMCM), and a 60-second `expiresAt` (`CLAIM_TTL_SEC`). The form
-switches into **verifying** state.
+100–999,999 nMCM, unique among live claims), and a 15-minute `expiresAt`
+(`CLAIM_TTL_SEC`). It also rejects a tag+hex pair that doesn't belong to the
+same wallet, and returns the deposit address. The form switches into
+**verifying** state.
 
-**Step 2 — verify via mempool watch.** The form displays the wallet hex, the
-challenge amount (click-to-copy), a countdown, and instructions:
+**Step 2 — pay the challenge.** The form shows the amount in MCM
+(auto-copied to the clipboard), the deposit address, and a countdown:
 
-> *Send EXACTLY 483,712 nMCM (= 0.000483712 MCM) from this wallet within 60
-> seconds. Any recipient — sending to yourself works. We'll auto-detect it
-> via the Mochimo Mesh mempool.*
+> *Send EXACTLY 0.000483712 MCM to `226qEKxKSKCXMVtmBFVPKAz7H5aVjgH`.*
+
+Only the key holder can make that payment, which is what proves ownership —
+Mochimo's WOTS+ keys are one-time-use, so wallets don't offer "sign this
+message" the way Ethereum does; a transaction is the available proof.
 
 The client polls `POST /api/wallet/poll-claim` every 5 seconds. Each call:
-1. Server-side throttle (`MIN_CHECK_INTERVAL_MS = 3s`) so concurrent users
-   don't hammer the public Mesh node.
-2. `checkMempoolForAddress()` in [src/lib/mochimo.ts](src/lib/mochimo.ts)
-   fetches `/mempool` (list of pending tx hashes), then iterates
-   `/mempool/transaction` for each, comparing every operation's
-   `account.address` (lowercased) against the claim's hex with `0x` prefix
-   **and** the operation's absolute amount against `challengeNanoMcm` — so an
-   unrelated pending tx from the same wallet can't satisfy the claim.
+1. Server-side throttle (`MIN_CHECK_INTERVAL_MS = 6s`), claimed *before* the
+   Mesh work starts so overlapping polls don't stack up on the public node.
+2. `findChallengePayment()` in [src/lib/mochimo.ts](src/lib/mochimo.ts) looks
+   for a single transaction carrying **both** legs: a source operation from
+   the claimed wallet (negative amount) **and** a destination operation to the
+   deposit address for exactly `challengeNanoMcm`. It checks `/mempool` first
+   (visible seconds after the user hits send), then the last
+   `CONFIRMED_BLOCK_LOOKBACK` blocks via `/block` for a payment that was
+   already mined.
 3. First match → `WalletClaim.verifiedAt` set + `verifiedTxHash` saved.
+
+Why the exact amount matters: the fee is folded into the source leg
+(`-200728034` for a `733035` transfer plus `500` fee), so only the
+**destination** leg carries the challenge value verbatim. Matching both legs
+means neither an unrelated payment to us nor an unrelated spend from the
+user's wallet can satisfy a claim on its own.
+
+`/search/transactions` would be the obvious way to find confirmed payments,
+but the public node takes 17s+ for a 5-row page and times out near 50 — hence
+the block scan, where `/block` answers in well under a second.
 
 When the poll response is `status: "verified"`, the form swaps to
 **Step 3 — set credentials**: username + password + confirm. Submit posts to
@@ -117,6 +137,14 @@ allow-list via `ADMIN_TWITTER_HANDLES` only works for Twitter sign-in).
 | --- | --- | --- |
 | Hex (canonical) | `0xd9c0c06c5383eb5cc0159f618101003d3b7abe84` | sent to Mesh API |
 | Base58 tag | `226qEKxKSKCXMVtmBFVPKAz7H5aVjgH` | display on dashboard / leaderboard |
+
+`base58TagToHex()` converts between them: the tag decodes to 22 bytes — the
+20-byte account tag plus a 2-byte checksum. Verified against two known pairs
+(`226qEK…` → `d9c0c0…30be`, `7JTCuV…` → `17371f…`). Mesh answers *"Invalid
+account format"* for base58, so every on-chain call goes through the decoder.
+
+The deposit wallet users pay to register comes from `MOCHIMO_DEPOSIT_TAG`
+(see `.env.example`) via `getDepositAddress()`.
 
 `verifyMochimoAddressOnchain()` POSTs the hex to
 `{MOCHIMO_MESH_URL}/account/balance` (Rosetta 1.4.13). It returns:
@@ -305,15 +333,18 @@ PGPASSWORD=mochimo123 psql -h localhost -U mochimo -d mochimo_tasks
 
 ### Known prototype gaps
 
-- **Wallet ownership IS proven** as of the mempool-watch flow above — the
-  user must send a tx with the exact random challenge amount from the wallet
-  inside the 60-second claim window, so a pre-existing pending tx can't
-  satisfy the claim. The remaining friction is the window itself: 60 seconds
-  is tight for someone who still has to open their wallet software. Raise
-  `CLAIM_TTL_SEC` in
-  [src/app/api/wallet/start-claim/route.ts](src/app/api/wallet/start-claim/route.ts)
-  if users report timeouts — the amount challenge, not the short window, is
-  what carries the security.
+- **Wallet ownership IS proven** — the user pays an exact random amount from
+  the claimed wallet to the deposit address inside a 15-minute window, and we
+  match both legs of that transaction. Remaining rough edges:
+  - Sign-up **costs the user** the challenge amount (≤ 0.001 MCM) plus the
+    500 nMCM fee. Cheap, but not free, and it can't be refunded automatically
+    yet.
+  - Blocks are ~170s apart, so a payment that misses the mempool window is
+    seen only when mined; the claim TTL is sized around that.
+  - The block scan looks back `CONFIRMED_BLOCK_LOOKBACK` (8) blocks. Raise it
+    if you also raise `CLAIM_TTL_SEC` in
+    [src/app/api/wallet/start-claim/route.ts](src/app/api/wallet/start-claim/route.ts),
+    or a claim can expire pointing at a block the scan no longer reaches.
 - **Tweet freshness** isn't verified — daily tasks accept any tweet from
   @mochimo's history, not just today's. Needs X API integration to check
   `created_at`.

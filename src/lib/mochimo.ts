@@ -105,102 +105,235 @@ export type MeshVerifyResult =
 
 const DEFAULT_MESH_URL = "https://api.mochimo.org";
 
-// ── Mempool watch for proof-of-ownership ────────────────────────────────────
+// ── Base58 tag → hex ────────────────────────────────────────────────────────
 //
-// Forum-mochimo-style verification: instead of trusting "this hex exists on
-// chain", we wait for the user to trigger a fresh transaction FROM that hex.
-// Mesh exposes /mempool (list of pending tx hashes) + /mempool/transaction
-// (operations of a specific pending tx). For each pending tx we inspect every
-// operation's account.address — if it matches the claimed hex, we have proof
-// the wallet holder is the one initiating the action.
+// Mochimo's base58 tag decodes to 22 bytes: the 20-byte account tag followed
+// by a 2-byte checksum. Verified against a known pair:
+//   "226qEKxKSKCXMVtmBFVPKAz7H5aVjgH"
+//     → d9c0c06c5383eb5cc0159f618101003d3b7abe84 + 30be
+// The Mesh API only accepts the hex form ("Invalid account format" for base58),
+// so every on-chain path goes through this decoder.
+
+/** Decode a base58 Mochimo tag to its 40-char lowercase hex, or null. */
+export function base58TagToHex(tag: string): string | null {
+  const v = tag.trim();
+  if (!isBase58MochimoTag(v)) return null;
+
+  let n = 0n;
+  for (const ch of v) {
+    const idx = BASE58_ALPHABET.indexOf(ch);
+    if (idx < 0) return null;
+    n = n * 58n + BigInt(idx);
+  }
+  let hex = n.toString(16);
+  if (hex.length % 2) hex = `0${hex}`;
+  // Leading "1" chars in base58 are leading zero bytes.
+  let leading = 0;
+  for (const ch of v) {
+    if (ch === BASE58_ALPHABET[0]) leading++;
+    else break;
+  }
+  hex = "00".repeat(leading) + hex;
+
+  // 20-byte tag + 2-byte checksum. Anything else isn't a tag we understand.
+  if (hex.length !== 44) return null;
+  return hex.slice(0, HEX_RAW).toLowerCase();
+}
+
+// ── Deposit address (registration target) ───────────────────────────────────
+
+const DEFAULT_DEPOSIT_TAG = "226qEKxKSKCXMVtmBFVPKAz7H5aVjgH";
+
+/**
+ * The wallet users send their registration challenge payment TO. Configure
+ * with MOCHIMO_DEPOSIT_TAG (base58, as shown on Mochiscan); MOCHIMO_DEPOSIT_HEX
+ * overrides the decoded hex if you ever need to set it by hand.
+ *
+ * This address receives real MCM — make sure it is a wallet you hold the keys
+ * to before deploying.
+ */
+export function getDepositAddress(): { tag: string; hex: string } {
+  const tag = process.env.MOCHIMO_DEPOSIT_TAG?.trim() || DEFAULT_DEPOSIT_TAG;
+  const override = process.env.MOCHIMO_DEPOSIT_HEX?.trim();
+  const hex = override
+    ? override.replace(/^0x/i, "").toLowerCase()
+    : base58TagToHex(tag);
+  if (!hex || !/^[0-9a-f]{40}$/.test(hex)) {
+    throw new Error(
+      `Could not resolve deposit address from MOCHIMO_DEPOSIT_TAG="${tag}". Set MOCHIMO_DEPOSIT_HEX explicitly.`,
+    );
+  }
+  return { tag, hex };
+}
+
+// ── Challenge-payment lookup for proof-of-ownership ─────────────────────────
 //
-// Returns the tx hash that matched, or null if no match yet. Network errors
-// → null (treat as "still pending"); pages will keep polling.
+// Registration proof: the user sends an exact, randomly-generated amount FROM
+// their wallet TO our deposit address. We accept a transaction only when the
+// same tx carries both halves:
+//
+//   SOURCE op       account.address == user hex, amount < 0
+//   DESTINATION op  account.address == deposit hex, amount == challenge
+//
+// Requiring both means neither an unrelated payment to us nor an unrelated
+// payment from the user's wallet can satisfy a claim on its own. Real Mesh
+// operations look like this (fee is folded into the source leg):
+//
+//   SOURCE_TRANSFER       0x1737…3ee6  -200728034
+//   DESTINATION_TRANSFER  0xf466…cecc      733035
+//   DESTINATION_TRANSFER  0x1737…3ee6   199994499   (change back to sender)
+//
+// so the exact challenge amount only ever appears on the destination leg —
+// which is why we match against that one, not the source total.
 
 type RosettaTxIdentifier = { hash: string };
 type RosettaOperation = {
+  type?: string;
   account?: { address?: string };
   amount?: { value?: string; currency?: { symbol?: string; decimals?: number } };
 };
+type RosettaTransaction = {
+  transaction_identifier?: RosettaTxIdentifier;
+  operations?: RosettaOperation[];
+};
+
+/** Upper bound on mempool entries inspected per check (one request each). */
+const MEMPOOL_SCAN_LIMIT = 10;
+/**
+ * How many recent blocks to scan for an already-confirmed payment. Blocks run
+ * ~170s apart, so 8 covers ~23 minutes — comfortably more than a claim's
+ * 15-minute lifetime.
+ */
+const CONFIRMED_BLOCK_LOOKBACK = 8;
+
+export type ChallengePayment = {
+  /** Transaction hash carrying the challenge payment. */
+  hash: string;
+  /** false = still in the mempool, true = already in a block. */
+  confirmed: boolean;
+};
+
+type ChallengeQuery = {
+  /** Sender: the wallet being claimed (40 hex chars, no prefix). */
+  fromHex: string;
+  /** Recipient: our deposit wallet (40 hex chars, no prefix). */
+  toHex: string;
+  /** Exact amount in nMCM the destination leg must carry. */
+  nanoMcm: number;
+  /** How many recent blocks to scan for a confirmed payment. */
+  lookbackBlocks?: number;
+  meshUrl?: string;
+  network?: string;
+  timeoutMs?: number;
+};
+
+function opAddress(op: RosettaOperation): string | null {
+  return op.account?.address?.replace(/^0x/i, "").toLowerCase() ?? null;
+}
+
+function txCarriesChallenge(tx: RosettaTransaction, q: ChallengeQuery): boolean {
+  const ops = tx.operations ?? [];
+  const from = q.fromHex.replace(/^0x/i, "").toLowerCase();
+  const to = q.toHex.replace(/^0x/i, "").toLowerCase();
+
+  const spentByClaimer = ops.some((op) => {
+    if (opAddress(op) !== from) return false;
+    const value = Number(op.amount?.value);
+    return Number.isFinite(value) && value < 0;
+  });
+  if (!spentByClaimer) return false;
+
+  return ops.some((op) => {
+    if (opAddress(op) !== to) return false;
+    const value = Number(op.amount?.value);
+    return Number.isFinite(value) && value === q.nanoMcm;
+  });
+}
 
 /**
- * Watch the Mesh mempool for a tx FROM the given hex whose operation amount
- * matches `challengeNanoMcm` (if provided). Returns the matching tx hash or
- * null.
+ * Look for the challenge payment: first in the mempool (shows up seconds after
+ * the user hits send), then in the most recent blocks (for a payment that was
+ * already mined).
  *
- * The challenge filter eliminates the false-positive case where the user
- * happens to have an unrelated pending tx — only a tx with the exact amount
- * we asked for proves ownership.
+ * Returns the matching payment, or null when nothing matches yet. Network
+ * errors also return null so the caller just keeps polling.
  */
-export async function checkMempoolForAddress(
-  hexNoPrefix: string,
-  opts: {
-    challengeNanoMcm?: number;
-    meshUrl?: string;
-    network?: string;
-    timeoutMs?: number;
-  } = {},
-): Promise<string | null> {
-  const meshUrl = opts.meshUrl ?? process.env.MOCHIMO_MESH_URL ?? DEFAULT_MESH_URL;
-  const network = opts.network ?? process.env.MOCHIMO_MESH_NETWORK ?? "mainnet";
-  const timeoutMs = opts.timeoutMs ?? 8000;
-  const target = `0x${hexNoPrefix.toLowerCase()}`;
+export async function findChallengePayment(
+  q: ChallengeQuery,
+): Promise<ChallengePayment | null> {
+  const meshUrl = (q.meshUrl ?? process.env.MOCHIMO_MESH_URL ?? DEFAULT_MESH_URL).replace(
+    /\/$/,
+    "",
+  );
+  const network = q.network ?? process.env.MOCHIMO_MESH_NETWORK ?? "mainnet";
   const networkIdentifier = { blockchain: "mochimo", network };
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const listRes = await fetch(`${meshUrl.replace(/\/$/, "")}/mempool`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({ network_identifier: networkIdentifier }),
-    });
-    if (!listRes.ok) return null;
-
-    const listData = (await listRes.json()) as {
-      transaction_identifiers?: RosettaTxIdentifier[];
-    };
-    const ids = listData.transaction_identifiers ?? [];
-    if (ids.length === 0) return null;
-
-    // Sequentially inspect — mempool is usually small for Mochimo, and
-    // parallel fan-out can rate-limit a public node.
-    for (const { hash } of ids) {
-      if (controller.signal.aborted) break;
-      const txRes = await fetch(`${meshUrl.replace(/\/$/, "")}/mempool/transaction`, {
+  // Each request gets its own deadline. One shared budget doesn't work here:
+  // /mempool/transaction is slow enough that walking the mempool can eat the
+  // whole allowance and abort the search that follows it.
+  const perRequestMs = q.timeoutMs ?? 8000;
+  const post = async (path: string, body: unknown) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), perRequestMs);
+    try {
+      const r = await fetch(`${meshUrl}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
-        body: JSON.stringify({
-          network_identifier: networkIdentifier,
-          transaction_identifier: { hash },
-        }),
+        body: JSON.stringify(body),
       });
-      if (!txRes.ok) continue;
-      const txData = (await txRes.json()) as {
-        transaction?: { operations?: RosettaOperation[] };
-      };
-      const ops = txData.transaction?.operations ?? [];
-      const matched = ops.some((op) => {
-        if (op.account?.address?.toLowerCase() !== target) return false;
-        if (opts.challengeNanoMcm == null) return true;
-        const raw = op.amount?.value;
-        if (raw == null) return false;
-        // Operation amount may be a signed string; we compare absolute value
-        // because the same tx has +N for the recipient and -N for the sender.
-        const abs = Math.abs(Number(raw));
-        return Number.isFinite(abs) && abs === opts.challengeNanoMcm;
-      });
-      if (matched) return hash;
+      if (!r.ok) return null;
+      return (await r.json()) as Record<string, unknown>;
+    } catch {
+      return null; // timeout or network blip — caller treats it as "not yet"
+    } finally {
+      clearTimeout(timer);
     }
-    return null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
+  };
+
+  // 1. Mempool — the common case: the user is watching the page and the
+  //    payment shows up pending within seconds of them hitting send.
+  const list = (await post("/mempool", { network_identifier: networkIdentifier })) as {
+    transaction_identifiers?: RosettaTxIdentifier[];
+  } | null;
+
+  for (const { hash } of (list?.transaction_identifiers ?? []).slice(0, MEMPOOL_SCAN_LIMIT)) {
+    const data = (await post("/mempool/transaction", {
+      network_identifier: networkIdentifier,
+      transaction_identifier: { hash },
+    })) as { transaction?: RosettaTransaction } | null;
+    if (data?.transaction && txCarriesChallenge(data.transaction, q)) {
+      return { hash, confirmed: false };
+    }
   }
+
+  // 2. Recent blocks — catches a payment that was already mined, e.g. the user
+  //    closed the tab or the poll landed after the block. /block is fast
+  //    (~0.3-0.8s, a few KB); /search/transactions is not usable here — on the
+  //    public node it takes 17s+ for a 5-row page and times out around 50.
+  const status = (await post("/network/status", {
+    network_identifier: networkIdentifier,
+  })) as { current_block_identifier?: { index?: number } } | null;
+
+  const head = status?.current_block_identifier?.index;
+  if (typeof head !== "number") return null;
+
+  const lookback = q.lookbackBlocks ?? CONFIRMED_BLOCK_LOOKBACK;
+  for (let index = head; index > head - lookback && index >= 0; index--) {
+    const data = (await post("/block", {
+      network_identifier: networkIdentifier,
+      block_identifier: { index },
+    })) as { block?: { transactions?: RosettaTransaction[] } } | null;
+
+    for (const tx of data?.block?.transactions ?? []) {
+      if (txCarriesChallenge(tx, q)) {
+        const hash = tx.transaction_identifier?.hash;
+        if (hash) return { hash, confirmed: true };
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function verifyMochimoAddressOnchain(
@@ -211,17 +344,22 @@ export async function verifyMochimoAddressOnchain(
   const fmt = detectFormat(v);
   if (!fmt) return { ok: false, reason: "Invalid base58/hex format" };
 
-  // Mesh API requires hex with "0x" prefix. We can't reliably decode the
-  // base58 tag without Mochimo-specific code, so we soft-fail to "unknown"
-  // for tag input — the account is still created, just flagged unverified.
+  // Mesh API requires hex with "0x" prefix. Base58 tags are decoded first
+  // (see base58TagToHex); a tag we can't decode soft-fails to "unknown" so a
+  // format we don't recognise never locks a user out.
+  let hexInput = v;
   if (fmt === "tag") {
-    return {
-      ok: "unknown",
-      reason: "Base58 tag accepted as-is — paste hex (0x…) to enable on-chain verification.",
-    };
+    const decoded = base58TagToHex(v);
+    if (!decoded) {
+      return {
+        ok: "unknown",
+        reason: "Could not decode base58 tag — paste hex (0x…) to enable on-chain verification.",
+      };
+    }
+    hexInput = decoded;
   }
 
-  const hex = v.startsWith("0x") ? v.toLowerCase() : `0x${v.toLowerCase()}`;
+  const hex = hexInput.startsWith("0x") ? hexInput.toLowerCase() : `0x${hexInput.toLowerCase()}`;
   if (hex.length !== HEX_RAW + 2) {
     return { ok: false, reason: `Expected 40 hex chars after 0x, got ${hex.length - 2}` };
   }
