@@ -52,7 +52,13 @@ of the wallet is proven on-chain before the account is created.
 Set `MOCHIMO_DEPOSIT_TAG` to a wallet **you** control before letting anyone
 sign up — that address receives the registration payments.
 
-Requires Node 18.18+ (Next.js 15 refuses to start on 18.17).
+Requires **Node 20.9+** — Next 16 and Prisma 7 both refuse to run on Node 18.
+With nvm: `nvm install 20 && nvm use 20`.
+
+Connection URLs live in `prisma.config.ts`, not `schema.prisma`: Prisma 7
+removed `url`/`directUrl` from the schema. The CLI uses `DIRECT_URL` (falling
+back to `DATABASE_URL`) for migrations; the app hands `DATABASE_URL` to the
+Postgres driver adapter in [src/lib/prisma.ts](src/lib/prisma.ts).
 
 ---
 
