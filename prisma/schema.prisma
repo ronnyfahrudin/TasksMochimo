@@ -84,6 +84,14 @@ model User {
   // Referral
   referralCode   String   @unique @default(cuid())
   referredById   String?
+  // When the referrer was actually PAID for this account. A referral is only
+  // worth points once the invitee has done real work (see ReferralPolicy), so
+  // attribution and payment are separate moments.
+  referralPaidAt DateTime?
+  // Salted hash of the address this account signed up from. Never the raw IP:
+  // it exists only to spot one person farming many accounts, and a hash is
+  // enough for that. Cleared by design if you ever need to purge it.
+  signupIpHash   String?
   referredBy     User?    @relation("Referrals", fields: [referredById], references: [id])
   referrals      User[]   @relation("Referrals")
 
@@ -100,6 +108,7 @@ model User {
   @@index([points])
   @@index([lifetimePoints])
   @@index([referredById])
+  @@index([signupIpHash])
 }
 
 enum UserRole {

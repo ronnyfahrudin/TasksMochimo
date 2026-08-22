@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { UnauthenticatedError, ValidationError } from "@/domain/shared/errors";
 import { auth } from "@/lib/auth";
-import { moderateContent } from "@/lib/ai-moderate";
+import { useCases } from "@/infrastructure/container";
+import { toErrorResponse } from "@/interface/http/error-mapper";
 
 const BodySchema = z.object({
   taskTitle: z.string().min(1).max(200),
@@ -10,20 +12,25 @@ const BodySchema = z.object({
   proofText: z.string().max(4000).optional(),
 });
 
-/** Manual AI re-moderation endpoint — admins only. */
+/** Manual AI re-moderation from the review queue — moderators only. */
 export async function POST(req: Request) {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  try {
+    const session = await auth();
+    if (!session?.user?.id) throw new UnauthenticatedError();
+
+    const parsed = BodySchema.safeParse(await req.json().catch(() => ({})));
+    if (!parsed.success) throw new ValidationError("body.invalid", "Invalid body");
+
+    const verdict = await useCases
+      .moderateProof()
+      .execute({ requestedById: session.user.id, ...parsed.data });
+
+    return NextResponse.json({
+      verdict: verdict.verdict,
+      score: verdict.score,
+      reason: verdict.reason,
+    });
+  } catch (error) {
+    return toErrorResponse(error);
   }
-  if (session.user.role !== "ADMIN" && session.user.role !== "MODERATOR") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-  const body = await req.json().catch(() => ({}));
-  const parsed = BodySchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
-  }
-  const verdict = await moderateContent(parsed.data);
-  return NextResponse.json(verdict);
 }

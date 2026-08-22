@@ -16,6 +16,21 @@ declare module "next-auth" {
   }
 }
 
+/**
+ * Admin membership.
+ *
+ * ADMIN_TWITTER_IDS is the real control: an X numeric id is immutable, while a
+ * @handle can be renamed and then registered by someone else — whoever picks
+ * up an abandoned admin handle would otherwise inherit admin rights.
+ *
+ * ADMIN_TWITTER_HANDLES still works so existing deployments keep functioning,
+ * but it is a migration path, not a destination.
+ */
+const adminIds = (process.env.ADMIN_TWITTER_IDS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const adminHandles = (process.env.ADMIN_TWITTER_HANDLES ?? "")
   .split(",")
   .map((s) => s.trim().toLowerCase())
@@ -43,7 +58,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         | undefined;
       const twitterId = p?.data?.id ?? p?.id_str ?? account.providerAccountId;
       const handle = (p?.data?.username ?? p?.screen_name ?? "").toLowerCase();
-      const isAdmin = adminHandles.includes(handle);
+      const byId = twitterId ? adminIds.includes(String(twitterId)) : false;
+      const byHandle = adminHandles.includes(handle);
+      if (byHandle && !byId) {
+        console.warn(
+          `[auth] granting ADMIN to @${handle} by handle — set ADMIN_TWITTER_IDS=${twitterId} instead; handles can change hands`,
+        );
+      }
+      const isAdmin = byId || byHandle;
 
       await prisma.user.update({
         where: { id: user.id },

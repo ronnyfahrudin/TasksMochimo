@@ -1,49 +1,27 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { UnauthenticatedError, ValidationError } from "@/domain/shared/errors";
 import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { useCases } from "@/infrastructure/container";
+import { toErrorResponse } from "@/interface/http/error-mapper";
 
 const BodySchema = z.object({ code: z.string().min(1).max(64) });
 
-/**
- * Called by the dashboard after a referred user signs up.
- * Links the new user to the referrer; the actual points award fires when
- * the new user saves their Mochimo address (see /api/user/mochimo-address).
- */
+/** Record who referred the signed-in account. Attribution only, no payout. */
 export async function POST(req: Request) {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-  const body = await req.json().catch(() => ({}));
-  const parsed = BodySchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid code" }, { status: 400 });
-  }
+  try {
+    const session = await auth();
+    if (!session?.user?.id) throw new UnauthenticatedError();
 
-  const me = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: { referredById: true, referralCode: true },
-  });
-  if (me?.referredById) {
-    return NextResponse.json({ ok: true, alreadyLinked: true });
-  }
-  if (me?.referralCode === parsed.data.code) {
-    return NextResponse.json({ error: "Cannot refer yourself" }, { status: 400 });
-  }
+    const parsed = BodySchema.safeParse(await req.json().catch(() => ({})));
+    if (!parsed.success) throw new ValidationError("code.invalid", "Invalid code");
 
-  const referrer = await prisma.user.findUnique({
-    where: { referralCode: parsed.data.code },
-    select: { id: true },
-  });
-  if (!referrer) {
-    return NextResponse.json({ error: "Invalid referral code" }, { status: 404 });
+    const result = await useCases
+      .linkReferrer()
+      .execute({ userId: session.user.id, code: parsed.data.code });
+
+    return NextResponse.json({ ok: true, ...result });
+  } catch (error) {
+    return toErrorResponse(error);
   }
-
-  await prisma.user.update({
-    where: { id: session.user.id },
-    data: { referredById: referrer.id },
-  });
-
-  return NextResponse.json({ ok: true, linked: true });
 }

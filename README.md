@@ -90,7 +90,7 @@ message" the way Ethereum does; a transaction is the available proof.
 The client polls `POST /api/wallet/poll-claim` every 5 seconds. Each call:
 1. Server-side throttle (`MIN_CHECK_INTERVAL_MS = 6s`), claimed *before* the
    Mesh work starts so overlapping polls don't stack up on the public node.
-2. `findChallengePayment()` in [src/lib/mochimo.ts](src/lib/mochimo.ts) looks
+2. `findChallengePayment()` in [MochimoMeshGateway](src/infrastructure/mesh/mochimo-mesh-gateway.ts) looks
    for a single transaction carrying **both** legs: a source operation from
    the claimed wallet (negative amount) **and** a destination operation to the
    deposit address for exactly `challengeNanoMcm`. It checks `/mempool` first
@@ -116,10 +116,26 @@ from the verified claim (the client can't override them at this point),
 which is what makes the flow trustworthy. The claim is marked
 `consumedAt` so it can't be replayed.
 
-`POST /api/auth/credentials-signin` (separate from signup) verifies username
-+ password via `scryptSync` in constant time (also runs against a
+`POST /api/auth/credentials-signin` → [SignInWithCredentials](src/application/identity/sign-in-with-credentials.ts) verifies username
++ password via [ScryptPasswordHasher](src/infrastructure/crypto/scrypt-password-hasher.ts) in constant time (also runs against a
 placeholder hash on unknown usernames so timing can't enumerate users),
 creates a `Session` row, and sets the Auth.js `authjs.session-token` cookie.
+
+### Free public-testing mode (`FREE_SIGNUP_MODE=on`)
+
+For an open beta where testers shouldn't have to spend MCM (or own a real
+wallet at all), set `FREE_SIGNUP_MODE=on`. `/api/wallet/start-claim` then
+skips the deposit wallet entirely, creates the `WalletClaim` already
+`verifiedAt`, stamps `verifiedTxHash = "FREE_SIGNUP_NO_PAYMENT"`, and returns
+`freeSignup: true`. The form jumps straight from step 1 to step 3, and both
+step 1 and step 3 show a yellow **"Free public testing — wallet ownership is
+not verified"** banner. Nothing else in the app changes: `/wallet-signup`,
+the poller, tasks, and points all behave as they do after a real payment.
+
+The trade-off is total: **anyone can register anyone's wallet address**, and
+`MOCHIMO_DEPOSIT_TAG` is no longer required. Only turn it on for a throwaway
+beta database whose accounts and points you are willing to wipe. Leaving the
+variable unset keeps the paid-challenge proof of ownership (the default).
 
 ### Twitter OAuth 2.0 (optional)
 
@@ -131,7 +147,7 @@ allow-list via `ADMIN_TWITTER_HANDLES` only works for Twitter sign-in).
 
 ## Mochimo wallet binding (Mesh-verified)
 
-[src/lib/mochimo.ts](src/lib/mochimo.ts) handles both address formats:
+[MochimoAddress](src/domain/wallet/mochimo-address.ts) handles both address formats:
 
 | Form | Example | Source |
 | --- | --- | --- |
@@ -144,9 +160,9 @@ allow-list via `ADMIN_TWITTER_HANDLES` only works for Twitter sign-in).
 account format"* for base58, so every on-chain call goes through the decoder.
 
 The deposit wallet users pay to register comes from `MOCHIMO_DEPOSIT_TAG`
-(see `.env.example`) via `getDepositAddress()`.
+(see `.env.example`) via [app-config.ts](src/infrastructure/config/app-config.ts).
 
-`verifyMochimoAddressOnchain()` POSTs the hex to
+`MeshGateway.checkAddress()` POSTs the hex to
 `{MOCHIMO_MESH_URL}/account/balance` (Rosetta 1.4.13). It returns:
 
 - `ok: true` — Mesh accepted the address (with balance / block index)
@@ -167,15 +183,14 @@ SOCIAL, CONTENT, REFERRAL, and DAILY categories. Daily Twitter tasks
 
 ### Submit flow
 
-`POST /api/tasks/submit` in
-[src/app/api/tasks/submit/route.ts](src/app/api/tasks/submit/route.ts):
+`POST /api/tasks/submit` → [SubmitTaskProof](src/application/tasks/submit-task-proof.ts):
 
 1. Auth + ban check.
 2. Wallet required for non-DAILY tasks.
 3. **Tweet URL normalization**: any submission shaped like a tweet URL
    (x.com, twitter.com, mobile, with tracking params, `/photo/1` suffix,
-   etc.) is run through `extractTweetId()` in
-   [src/lib/twitter.ts](src/lib/twitter.ts) and stored in canonical form
+   etc.) is run through `TweetId.fromUrl()` in
+   [TweetId](src/domain/tasks/proof.ts) and stored in canonical form
    `https://x.com/{user}/status/{id}`.
 4. **Tweet-ID dedup across the whole system**, including `FLAGGED` status —
    the same tweet can never be claimed twice, by anyone, in any format.
@@ -185,8 +200,8 @@ SOCIAL, CONTENT, REFERRAL, and DAILY categories. Daily Twitter tasks
    `AUTO_APPROVED` + points awarded.
 8. Otherwise: AI moderation → `auto-approve >= 0.85`, `flag <= 0.2`,
    otherwise PENDING for admin.
-9. Atomic `awardPoints()` increments `points` *and* `lifetimePoints` and
-   writes a `PointsLedger` row tagged with `YYYY-MM`.
+9. `RewardsRepository.award()` increments `points` *and* `lifetimePoints` and
+   writes a `PointsLedger` row tagged with `YYYY-MM`, in one transaction.
 
 ### Admin moderation
 
@@ -198,7 +213,7 @@ AI verdict + score and offers **Re-moderate**, **Approve**, **Reject**.
 
 ## Monthly leaderboard reset
 
-[src/app/api/cron/reset-leaderboard/route.ts](src/app/api/cron/reset-leaderboard/route.ts):
+[ResetLeaderboard](src/application/rewards/reset-leaderboard.ts):
 
 - Auth via `Authorization: Bearer ${CRON_SECRET}`
 - Snapshots `User.points > 0` into `LeaderboardSnapshot` (period = month
@@ -217,59 +232,85 @@ Schedule it with whichever you prefer:
 
 ---
 
-## Architecture map
+## Architecture — domain-driven layering
+
+The code is organised by **bounded context**, not by file type. A rule lives in
+exactly one place, and the layers only ever point inward: `app/` depends on
+`application/`, which depends on `domain/`. `domain/` depends on nothing —
+no Prisma, no Next, no `process.env`, no `fetch`.
 
 ```
 src/
-├── app/
-│   ├── page.tsx                          # landing (hero + features)
-│   ├── signup/page.tsx                   # wallet-first 3-step signup
-│   ├── signin/page.tsx                   # username+password + optional X
-│   ├── dashboard/page.tsx                # points, wallet (tag + hex), referral, history
-│   ├── tasks/page.tsx                    # category tabs + stat banner
-│   ├── leaderboard/page.tsx              # monthly / all-time / last-month
-│   ├── admin/page.tsx                    # KPIs
-│   ├── admin/submissions/page.tsx        # moderation queue
-│   ├── globals.css                       # dark neon-green theme
-│   ├── layout.tsx
-│   └── api/
-│       ├── auth/[...nextauth]/route.ts   # NextAuth handlers (for Twitter OAuth)
-│       ├── auth/wallet-signup/route.ts   # finalize signup (consumes verified claim)
-│       ├── auth/credentials-signin/route.ts # username+password signin
-│       ├── wallet/start-claim/route.ts   # open WalletClaim (hex+tag → claimToken)
-│       ├── wallet/poll-claim/route.ts    # mempool watch poller
-│       ├── user/mochimo-address/route.ts # update wallet for Twitter users
-│       ├── tasks/submit/route.ts         # submit proof + dedup + AI mod
-│       ├── admin/submissions/[id]/route.ts # approve / reject
-│       ├── moderate/route.ts             # admin manual AI re-mod
-│       ├── referral/claim/route.ts
-│       └── cron/reset-leaderboard/route.ts
-├── components/
-│   ├── ui/…                              # shadcn primitives
-│   ├── navbar.tsx
-│   ├── task-card.tsx                     # client: Done badge, cooldown countdown, one-click for NONE/AUTO
-│   ├── wallet-signup-form.tsx            # 3-step: wallet → mempool watch → credentials
-│   ├── credentials-signin-form.tsx       # username+password signin
-│   ├── mochimo-address-form.tsx          # dashboard tag+hex form
-│   ├── referral-card.tsx
-│   ├── referral-capture.tsx
-│   └── review-row.tsx
-├── lib/
-│   ├── prisma.ts
-│   ├── auth.ts                           # Auth.js v5 (Twitter) + role helpers
-│   ├── password.ts                       # scrypt hash/verify (node:crypto)
-│   ├── mochimo.ts                        # tag/hex schemas + Mesh verifier
-│   ├── twitter.ts                        # tweet ID extract + canonical URL
-│   ├── points.ts                         # awardPoints() tx helper
-│   ├── ai-moderate.ts                    # Claude/Grok moderator
-│   ├── supabase.ts                       # service-role client (optional)
-│   └── utils.ts                          # cn(), currentPeriod(), etc.
-├── middleware.ts.bak                     # disabled — Prisma adapter incompatible with Edge
-prisma/schema.prisma                      # User (username/passwordHash/mochimoAddress/mochimoTag), Task, Submission, …
+├── domain/                        # the rules. Pure TypeScript, no I/O.
+│   ├── shared/                    #   DomainError taxonomy, Period, Clock/RandomSource ports
+│   ├── wallet/                    #   ┌ MochimoAddress (tag+hex are ONE identity)
+│   │                              #   │ ChallengeAmount, WalletClaim (aggregate root)
+│   │                              #   └ RegistrationPolicy, MeshGateway port
+│   ├── identity/                  #   Username, PlainPassword/PasswordHash, UserAccount,
+│   │                              #   Session, PasswordHasher port
+│   ├── tasks/                     #   Task, Submission (aggregate root), Proof/TweetId,
+│   │                              #   ModerationPolicy, ContentModerator port
+│   └── rewards/                   #   Points, ReferralPolicy, leaderboard ports
+│
+├── application/                   # use cases — orchestration + transaction boundaries
+│   ├── wallet/                    #   StartWalletClaim, PollWalletClaim
+│   ├── identity/                  #   RegisterWithWallet, SignInWithCredentials,
+│   │                              #   LinkWallet, LinkReferrer
+│   ├── tasks/                     #   SubmitTaskProof, ReviewSubmission, ModerateProof
+│   ├── rewards/                   #   AwardReferralBonus, ResetLeaderboard
+│   └── shared/unit-of-work.ts     #   UnitOfWork + Repositories ports
+│
+├── infrastructure/                # the outside world. Implements the ports above.
+│   ├── prisma/                    #   one repository per aggregate + PrismaUnitOfWork
+│   ├── mesh/                      #   MochimoMeshGateway (Rosetta: mempool + block scan)
+│   ├── ai/                        #   LlmContentModerator (Claude, Grok fallback)
+│   ├── crypto/                    #   ScryptPasswordHasher, nodeRandom
+│   ├── config/app-config.ts       #   THE only place that reads process.env
+│   └── container.ts               #   composition root — wires ports to adapters
+│
+├── interface/http/                # error-mapper (DomainError → status), session cookie
+│
+├── app/                           # Next.js: pages + thin API controllers
+│   └── api/…                      #   parse → call a use case → serialize. No rules here.
+└── components/                    # UI
+```
+
+### What the layering buys
+
+**One rule, one home.** The referral bonus used to be implemented twice — in
+the wallet sign-up route and in the "save my wallet" route — and the copies had
+already drifted. Now `ReferralPolicy` states the rule once ("earned when the
+invitee first has a wallet"), and both paths call `AwardReferralBonus`.
+
+**Illegal states stop being reachable.** `WalletClaim.consume()` is the only
+way to spend a claim and it refuses when the claim is unverified, expired, or
+already used — so no future route can forget one of those checks. Same for
+`Submission.approve()`, which refuses a second approval, and `MochimoAddress`,
+which cannot exist unless the tag decodes to the hex.
+
+**Transports are replaceable.** Use cases throw `DomainError`; only
+[error-mapper.ts](src/interface/http/error-mapper.ts) turns that into a status
+code. The same use case runs from a script or a test with no HTTP in sight.
+
+**Config can't leak into rules.** Policies take settings; they never read the
+environment. `FREE_SIGNUP_MODE`, the deposit wallet, and the Mesh URL are read
+in [app-config.ts](src/infrastructure/config/app-config.ts) alone.
+
+### Reading the flow
+
+Sign-up, end to end: [start-claim/route.ts](src/app/api/wallet/start-claim/route.ts)
+→ [StartWalletClaim](src/application/wallet/start-wallet-claim.ts) →
+[RegistrationPolicy](src/domain/wallet/registration-policy.ts) +
+[WalletClaim](src/domain/wallet/wallet-claim.ts) →
+[PrismaWalletClaimRepository](src/infrastructure/prisma/wallet-claim.repository.ts).
+The route is 25 lines and contains no rules; every decision above is testable
+without a database.
+
+```
+prisma/schema.prisma                      # persistence model (unchanged by the refactor)
 prisma/seed.ts                            # 16 starter tasks
-supabase/functions/reset-leaderboard/     # alt cron via Supabase
-vercel.json                               # Vercel Cron: 5 0 1 * *
-netlify.toml                              # Netlify build config
+src/lib/                                  # framework glue: prisma client, Auth.js, cn()
+src/middleware.ts.bak                     # disabled — Prisma adapter can't run on Edge
 ```
 
 Note: `middleware.ts` is intentionally renamed to `.bak`. NextAuth middleware
@@ -278,10 +319,47 @@ guard with their own `auth()` + `redirect()` so the middleware was redundant.
 
 ---
 
-## Dark neon-green theme
+## Brand key visual (landing hero)
+
+The landing page opens with the **Post-Quantum Armor** key visual, rendered by
+[BrandHero](src/components/brand-hero.tsx).
+
+**Drop the artwork here — the repo ships a placeholder:**
+
+```bash
+cp /path/to/post-quantum-armor.jpg public/brand/hero-armor.jpg
+```
+
+Requirements: 16:9, at least 1792×1008, dark left half (that's where the copy
+sits). WebP is worth the conversion — it typically halves the bytes on a hero
+this dark:
+
+```bash
+magick post-quantum-armor.jpg -quality 82 public/brand/hero-armor.webp
+# then point BrandHero's <Image src> at the .webp
+```
+
+How the component handles the artwork:
+
+- **Copy sits in the left negative space**, where the figure isn't — the two
+  never compete for the same pixels.
+- **The scrim is directional**: opaque→transparent left-to-right on desktop,
+  bottom-up on mobile, so the text always lands on the darkest region. The
+  desktop scrim is fully opaque through the first 26% of the frame, which
+  covers the artwork's baked-in MOCHIMO lockup (the navbar already shows it).
+- **Narrow screens re-frame rather than squash**: `object-position` pans to the
+  shield so the subject survives the crop.
+- `next/image` with `priority` + `sizes="100vw"` generates the responsive
+  srcset; the hero is the LCP element, so don't lazy-load it.
+
+## Brand teal theme
+
+
 
 Always-dark HSL tokens in [src/app/globals.css](src/app/globals.css), Tailwind
-extensions in [tailwind.config.ts](tailwind.config.ts):
+extensions in [tailwind.config.ts](tailwind.config.ts). The accent is
+`#16e299` — sampled from the official mark in `public/mcm-logo.jpg`, not
+eyeballed, so the UI and the key visual agree:
 
 - `text-glow` — neon text shadow
 - `gradient-text-neon` — three-stop gradient
@@ -338,12 +416,13 @@ PGPASSWORD=mochimo123 psql -h localhost -U mochimo -d mochimo_tasks
   match both legs of that transaction. Remaining rough edges:
   - Sign-up **costs the user** the challenge amount (≤ 0.001 MCM) plus the
     500 nMCM fee. Cheap, but not free, and it can't be refunded automatically
-    yet.
+    yet — set `FREE_SIGNUP_MODE=on` to waive it for a public test build (at
+    the cost of proving nothing; see above).
   - Blocks are ~170s apart, so a payment that misses the mempool window is
     seen only when mined; the claim TTL is sized around that.
   - The block scan looks back `CONFIRMED_BLOCK_LOOKBACK` (8) blocks. Raise it
     if you also raise `CLAIM_TTL_SEC` in
-    [src/app/api/wallet/start-claim/route.ts](src/app/api/wallet/start-claim/route.ts),
+    [RegistrationPolicy](src/domain/wallet/registration-policy.ts),
     or a claim can expire pointing at a block the scan no longer reaches.
 - **Tweet freshness** isn't verified — daily tasks accept any tweet from
   @mochimo's history, not just today's. Needs X API integration to check
