@@ -44,10 +44,11 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // Brand teal, sampled from the official Mochimo mark (public/mcm-logo.jpg).
         neon: {
-          DEFAULT: "#00ff88",
-          dim: "#00cc6a",
-          glow: "#39ff9f",
+          DEFAULT: "#16e299",
+          dim: "#0aa86f",
+          glow: "#4dffc4",
         },
       },
       borderRadius: {
@@ -60,8 +61,8 @@ const config: Config = {
         mono: ["var(--font-geist-mono)", "monospace"],
       },
       boxShadow: {
-        neon: "0 0 14px rgba(0,255,136,0.45), 0 0 32px rgba(0,255,136,0.25)",
-        "neon-sm": "0 0 8px rgba(0,255,136,0.4)",
+        neon: "0 0 14px rgba(22,226,153,0.45), 0 0 32px rgba(22,226,153,0.22)",
+        "neon-sm": "0 0 8px rgba(22,226,153,0.4)",
       },
       keyframes: {
         "accordion-down": {
@@ -73,8 +74,8 @@ const config: Config = {
           to: { height: "0" },
         },
         "pulse-neon": {
-          "0%,100%": { boxShadow: "0 0 12px rgba(0,255,136,0.4)" },
-          "50%": { boxShadow: "0 0 28px rgba(0,255,136,0.8)" },
+          "0%,100%": { boxShadow: "0 0 12px rgba(22,226,153,0.4)" },
+          "50%": { boxShadow: "0 0 28px rgba(22,226,153,0.75)" },
         },
       },
       animation: {

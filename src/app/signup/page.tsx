@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { WalletSignupForm } from "@/components/wallet-signup-form";
+import { freeSignupEnabled } from "@/infrastructure/config/app-config";
 
 export default async function SignUpPage({
   searchParams,
@@ -16,6 +17,7 @@ export default async function SignUpPage({
   if (session?.user) redirect("/dashboard");
 
   const { ref } = await searchParams;
+  const free = freeSignupEnabled();
 
   return (
     <div className="container max-w-md py-16">
@@ -26,12 +28,13 @@ export default async function SignUpPage({
           </div>
           <CardTitle className="text-2xl">Get started</CardTitle>
           <CardDescription>
-            Start with your Mochimo wallet — we&apos;ll verify it on-chain before
-            you earn any points.
+            {free
+              ? "Public testing build — sign up with any Mochimo wallet address, free and instant."
+              : "Start with your Mochimo wallet — we'll verify it on-chain before you earn any points."}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <WalletSignupForm referralCode={ref} />
+          <WalletSignupForm referralCode={ref} freeSignup={free} />
 
           <div className="flex items-center gap-3 text-xs text-muted-foreground">
             <Separator className="flex-1" />

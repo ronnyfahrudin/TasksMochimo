@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { mochimoHexSchema, mochimoTagSchema } from "@/lib/mochimo";
+import { mochimoHexSchema, mochimoTagSchema } from "@/domain/wallet/mochimo-address";
 
 export function MochimoAddressForm({
   initialHex,

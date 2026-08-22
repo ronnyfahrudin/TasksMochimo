@@ -4,8 +4,8 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ShieldCheck, Loader2, ExternalLink, Check, Copy } from "lucide-react";
-import { mochimoHexSchema, mochimoTagSchema } from "@/lib/mochimo";
+import { ShieldCheck, Loader2, ExternalLink, Check, Copy, AlertTriangle } from "lucide-react";
+import { mochimoHexSchema, mochimoTagSchema } from "@/domain/wallet/mochimo-address";
 
 type Step = "wallet" | "verifying" | "credentials";
 
@@ -24,7 +24,14 @@ async function copy(value: string, message: string) {
   }
 }
 
-export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
+export function WalletSignupForm({
+  referralCode,
+  freeSignup = false,
+}: {
+  referralCode?: string;
+  /** Server-rendered mirror of FREE_SIGNUP_MODE — banner only; the API decides. */
+  freeSignup?: boolean;
+}) {
   const [step, setStep] = useState<Step>("wallet");
 
   // Step 1: wallet inputs
@@ -74,6 +81,14 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
       if (!r.ok) throw new Error(data.error ?? "Failed to start claim");
       setClaimToken(data.claimToken);
       setExpiresAt(new Date(data.expiresAt));
+
+      // Free public-testing mode: the server issued an already-verified claim,
+      // so there is no payment to wait for — go straight to credentials.
+      if (data.freeSignup) {
+        setStep("credentials");
+        return;
+      }
+
       setChallengeNanoMcm(data.challengeNanoMcm);
       setChallengeMcm(data.challengeMcm);
       setDepositTag(data.depositTag);
@@ -105,6 +120,16 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
         });
         const data = await r.json();
         if (cancelled) return;
+
+        // Error bodies carry {error, code} and no `status`, so branching on
+        // status alone left the user watching a spinner forever after an
+        // expired or rejected claim. Surface it and stop polling.
+        if (!r.ok && !data.status) {
+          setVerifyMsg(data.error ?? "Verification failed. Start over.");
+          if (pollTimer.current) clearInterval(pollTimer.current);
+          return;
+        }
+
         if (data.status === "verified") {
           setVerifiedTxHash(data.verifiedTxHash);
           setStep("credentials");
@@ -197,6 +222,7 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
   if (step === "wallet") {
     return (
       <form onSubmit={startClaim} className="space-y-4">
+        {freeSignup && <FreeSignupBanner />}
         <FieldRow id="su-tag" label="Mochimo account tag" hint="Base58 tag shown on Mochiscan."
           value={tag} error={walletErr.tag} onChange={setTag} mono />
         <div className="space-y-1.5">
@@ -330,17 +356,24 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
   }
 
   // step === "credentials"
+  // No tx hash means the claim was issued pre-verified by free-signup mode —
+  // never claim the wallet was verified in that case.
+  const provenOnChain = Boolean(verifiedTxHash);
   return (
     <form onSubmit={submitCredentials} className="space-y-4">
-      <div className="rounded-lg border border-neon/40 bg-neon/10 p-3 space-y-1.5">
-        <div className="flex items-center gap-2 text-neon font-semibold text-sm">
-          <Check className="h-4 w-4" />
-          Wallet verified
+      {provenOnChain ? (
+        <div className="rounded-lg border border-neon/40 bg-neon/10 p-3 space-y-1.5">
+          <div className="flex items-center gap-2 text-neon font-semibold text-sm">
+            <Check className="h-4 w-4" />
+            Wallet verified
+          </div>
+          <div className="text-[11px] text-muted-foreground">
+            Tx: <code className="text-neon">{verifiedTxHash?.slice(0, 24)}…</code>
+          </div>
         </div>
-        <div className="text-[11px] text-muted-foreground">
-          Tx: <code className="text-neon">{verifiedTxHash?.slice(0, 24)}…</code>
-        </div>
-      </div>
+      ) : (
+        <FreeSignupBanner />
+      )}
 
       <FieldRow id="su-username" label="Username" hint="3–24 chars (letters, numbers, _)."
         value={username} error={credErr.username} onChange={setUsername} />
@@ -353,6 +386,24 @@ export function WalletSignupForm({ referralCode }: { referralCode?: string }) {
         {credBusy ? (<><Loader2 className="h-4 w-4 animate-spin" />Creating account…</>) : (<><ShieldCheck className="h-4 w-4" />Create account</>)}
       </Button>
     </form>
+  );
+}
+
+/** Loud, unmissable notice that this deployment skips on-chain proof. */
+function FreeSignupBanner() {
+  return (
+    <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-3 space-y-1">
+      <div className="flex items-center gap-2 text-yellow-400 font-semibold text-sm">
+        <AlertTriangle className="h-4 w-4" />
+        Free public testing
+      </div>
+      <p className="text-[11px] text-muted-foreground leading-relaxed">
+        Sign-up is free here — no MCM payment, and wallet ownership is{" "}
+        <strong className="text-yellow-400">not verified</strong>. Use a wallet
+        address you don&apos;t mind sharing. Test accounts and points may be
+        wiped at any time.
+      </p>
+    </div>
   );
 }
 
